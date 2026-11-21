@@ -1,21 +1,25 @@
-# Aster Browser — P0 scaffold
+# Aster Browser
 
-Modular Rust browser experiment. **Current status: Slint chrome shell with a deterministic mock engine. It does NOT render web pages yet.**
+A modular, experimental Rust browser shell. P0 uses Slint as the replaceable UI adapter and Chromium Embedded Framework (CEF) as an opt-in engine.
 
-## Architecture
+> **Development prototype, not a hardened browser.** The CEF path still requires compilation and desktop validation on a supported Linux host. OSR input, popups, accessibility, sandbox provisioning, downloads and production packaging are not complete.
 
-- `browser-contracts`: platform-neutral state, actions and BrowserEngine trait.
-- `browser-core`: tab lifecycle, commands, mock engine, deterministic tests.
-- `frontend-slint`: replaceable GUI frontend; no dependency on browser-core or CEF.
-- `engine-cef`: reserved CEF integration module, not implemented.
-- `aster-desktop`: composition root, currently selects MockEngine.
+## Crate boundaries
 
-Future frontends implement the same contracts and depend only on `browser-contracts`.
-Keep CEF lifecycle/threading concerns strictly inside the CEF adapter.
+- `browser-contracts`: UI/engine-neutral commands, snapshots, events and BGRA paint frames.
+- `browser-core`: tab state machine, normalization, engine event application and testable mock engine.
+- `frontend-slint`: replaceable GUI, Slint widgets and BGRA-to-image conversion; it knows no CEF APIs.
+- `engine-cef`: CEF wrapper, renderer/client callbacks, event pump, per-tab OSR surfaces and close acknowledgments.
+- `aster-desktop`: composition root; selects mock or CEF at compile time.
 
-## Linux / CachyOS prerequisites
+## Requirements
 
-Rust stable (Slint 1.19 requires Rust >=1.95), C++20 toolchain, CMake, Ninja, standard desktop development libraries.
+- Rust stable >= 1.95 (Rust 1.100 was used by the original contributor).
+- Linux x86_64, C/C++ compiler, CMake, Ninja and other CEF Linux runtime libraries.
+- CEF binary distribution matching `cef = 156.7.0` (first build can download a large SDK).
+- On Linux, Chromium sandbox support must be configured properly. Never solve failures by permanently disabling the sandbox.
+
+## Mock-only smoke tests
 
 ```sh
 cargo fmt --all -- --check
@@ -24,27 +28,53 @@ cargo check -p aster-desktop
 cargo run -p aster-desktop
 ```
 
-## CEF upstream smoke test (separate window)
+## CEF OSR test (Linux)
+
+Install a matching CEF binary release using upstream tooling (perform once per CEF version):
 
 ```sh
-./scripts/cef-smoke.sh
+git clone --depth 1 --branch 'cef-v156.7.0+156.0.31' https://github.com/tauri-apps/cef-rs.git /tmp/aster-cef-rs
+cd /tmp/aster-cef-rs
+cargo run -p export-cef-dir -- --force "$HOME/.local/share/cef"
 ```
 
-This builds and launches upstream `cefsimple`, not the Aster UI. It may download large CEF binaries and requires CEF runtime dependencies.
-See https://github.com/tauri-apps/cef-rs for platform notes.
+Then from the Aster Browser repository, in **Fish**:
 
-## Gate P0
+```fish
+set -gx CEF_PATH "$HOME/.local/share/cef"
+set -gx LD_LIBRARY_PATH $CEF_PATH $LD_LIBRARY_PATH
+set -gx SLINT_STYLE fluent-dark
+cargo check -p aster-desktop --features cef
+cargo run -p aster-desktop --features cef
+```
 
-- [x] Repository/workspace initialized.
-- [x] Contracts and dependency boundaries implemented.
-- [x] Core tab command handling and unit tests written.
-- [x] Slint UI wired to mock navigation commands.
-- [ ] Compile and run on actual Linux host (not available in authoring environment).
-- [ ] Run CEF smoke test (not available in authoring environment).
-- [ ] Integrate CEF surface into Slint and validate input, resize, rendering, sandbox and shutdown.
+Or in Bash:
 
-**P0 is not complete until the final three boxes are validated.**
+```sh
+export CEF_PATH="$HOME/.local/share/cef"
+export LD_LIBRARY_PATH="$CEF_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export SLINT_STYLE=fluent-dark
+cargo run -p aster-desktop --features cef
+```
 
-## Security and licensing
+The CEF build can download and extract hundreds of megabytes; this is expected. If a preinstalled CEF binary exists, point `CEF_PATH` to its directory instead. Never run Chromium as root. Consult upstream CEF Linux sandbox requirements if initialization aborts because `chrome-sandbox` is unavailable.
 
-Do not disable CEF sandbox in production. Check Slint licensing and CEF redistribution terms before distribution. The mock does not fetch URLs or execute JavaScript.
+## P0 operation
+
+- Open a new tab, enter a URL/search query and press Enter or click **Go**.
+- Navigate via **Back**, **Forward**, **Reload** and links within a rendered page.
+- Use the wheel to scroll. Window resizing updates the offscreen CEF viewport.
+- Close individual tabs with `x`. The last tab may be closed without closing the shell.
+- Close the Slint window to request all remaining Chromium browsers to close. The CEF loop waits up to 15 seconds for `OnBeforeClose` before shutting down. Unacknowledged close is reported as an error rather than a successful shutdown.
+
+## Current limitations
+
+- The CEF path **has not been compiled or runtime-tested in the artifact authoring environment**. The actual desktop host must validate it before calling P0 complete.
+- OSR uses a CPU BGRA readback and copy per frame, capped at 4096x2160; GPU texture sharing is future work.
+- Mouse left-click and wheel are forwarded. Full keyboard input to web contents, right-click menus, popup/select surfaces, drag/drop and IME are not implemented.
+- CEF popup windows are not accepted/managed; the first version is for simple page/navigation testing.
+- CEF runtime resources, Linux sandbox and bundling need platform testing.
+- The event pump currently uses a 16ms polling timer, not an optimized event-driven `OnScheduleMessagePumpWork` implementation.
+- `cargo check` with `--features cef` updates `Cargo.lock`. Commit the lockfile for reproducible builds.
+
+See [docs/P0-CEF.md](docs/P0-CEF.md), [docs/decisions.md](docs/decisions.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).

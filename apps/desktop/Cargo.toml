@@ -3,7 +3,13 @@ name = "aster-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = []
+cef = ["dep:engine-cef", "engine-cef/cef-runtime"]
+
 [dependencies]
 browser-contracts.workspace = true
 browser-core.workspace = true
 frontend-slint.workspace = true
+engine-cef = { path = "../../crates/engine-cef", optional = true }

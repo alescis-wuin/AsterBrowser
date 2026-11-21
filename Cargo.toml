@@ -11,4 +11,4 @@ license = "MIT OR Apache-2.0"
 browser-contracts = { path = "crates/browser-contracts" }
 browser-core = { path = "crates/browser-core" }
 frontend-slint = { path = "crates/frontend-slint" }
-engine-cef = { path = "crates/engine-cef" }
+# engine-cef is intentionally not a global dependency: only a concrete app opts in.
