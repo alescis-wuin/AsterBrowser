@@ -1,0 +1,9 @@
+[package]
+name = "aster-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+browser-contracts.workspace = true
+browser-core.workspace = true
+frontend-slint.workspace = true

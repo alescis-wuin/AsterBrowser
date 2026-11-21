@@ -1,0 +1,217 @@
+import { LineEdit } from "std-widgets.slint";
+
+export struct TabView {
+    id: int,
+    title: string,
+    active: bool,
+}
+
+component IconButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #3a4353;
+    background: touch.pressed ? #3a4353 : #252b36;
+
+    Text {
+        text: root.label;
+        color: #e5e7eb;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component TabChip inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    callback activated();
+    callback closed();
+
+    width: 190px;
+    height: 34px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: active ? #5b8cff : #303846;
+    background: active ? #2b3342 : #1b2029;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        Text {
+            text: root.title;
+            color: active ? #ffffff : #d1d5db;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        close-area := Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            background: close-touch.pressed ? #4b5563 : #00000000;
+
+            Text {
+                text: "×";
+                color: #cbd5e1;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-touch := TouchArea {
+                clicked => { root.closed(); }
+            }
+        }
+    }
+
+    tab-touch := TouchArea {
+        clicked => { root.activated(); }
+    }
+}
+
+export component BrowserWindow inherits Window {
+    title: "Aster — Prototype P0";
+    preferred-width: 1120px;
+    preferred-height: 740px;
+    min-width: 650px;
+    min-height: 400px;
+    background: #0f1318;
+
+    in property <[TabView]> tabs;
+    in property <string> current-url;
+    in property <string> status-text;
+
+    callback add-tab();
+    callback close-tab(int);
+    callback select-tab(int);
+    callback navigate(string);
+    callback back();
+    callback forward();
+    callback reload();
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 46px;
+            background: #181c22;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 6px;
+
+                for tab in tabs: TabChip {
+                    title: tab.title;
+                    active: tab.active;
+                    activated => { root.select-tab(tab.id); }
+                    closed => { root.close-tab(tab.id); }
+                }
+
+                Rectangle {
+                    width: 8px;
+                    background: #00000000;
+                }
+
+                IconButton {
+                    label: "+";
+                    clicked => { root.add-tab(); }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 52px;
+            background: #11161d;
+            border-width: 0px;
+
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 8px;
+
+                IconButton {
+                    label: "←";
+                    clicked => { root.back(); }
+                }
+
+                IconButton {
+                    label: "→";
+                    clicked => { root.forward(); }
+                }
+
+                IconButton {
+                    label: "↻";
+                    clicked => { root.reload(); }
+                }
+
+                address := LineEdit {
+                    text: root.current-url;
+                    horizontal-stretch: 1;
+                    accepted => { root.navigate(self.text); }
+                }
+
+                Rectangle {
+                    width: 70px;
+                    height: 32px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #3a4353;
+                    background: go-touch.pressed ? #3a4353 : #2563eb;
+
+                    Text {
+                        text: "Aller";
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    go-touch := TouchArea {
+                        clicked => { root.navigate(address.text); }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            background: #0f1318;
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 12px;
+
+                Text {
+                    text: "Aster Browser";
+                    font-size: 30px;
+                    color: #e5e7eb;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Prototype d’interface — surface Chromium non intégrée";
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.status-text;
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "frontend-slint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+[dependencies]
+slint = "=1.19.0"
+browser-contracts.workspace = true
+[build-dependencies]
+slint-build = "=1.19.0"

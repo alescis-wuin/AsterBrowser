@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/browser-contracts", "crates/browser-core", "crates/frontend-slint", "crates/engine-cef", "apps/desktop"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+browser-contracts = { path = "crates/browser-contracts" }
+browser-core = { path = "crates/browser-core" }
+frontend-slint = { path = "crates/frontend-slint" }
+engine-cef = { path = "crates/engine-cef" }
