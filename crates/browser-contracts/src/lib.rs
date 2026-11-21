@@ -23,6 +23,57 @@ pub enum PointerAction {
     Down,
     Up,
     Move,
+    Cancel,
+}
+
+/// Input descriptions are independent of the frontend toolkit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserKey {
+    Text(String),
+    Backspace,
+    Tab,
+    Enter,
+    Escape,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    F(u8),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAction {
+    Press,
+    Release,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyInput {
+    pub key: BrowserKey,
+    pub action: KeyAction,
+    pub modifiers: InputModifiers,
+    pub repeat: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +100,8 @@ pub enum BrowserCommand {
         x: i32,
         y: i32,
         action: PointerAction,
+        button: Option<PointerButton>,
+        modifiers: InputModifiers,
     },
     Scroll {
         tab: TabId,
@@ -56,6 +109,15 @@ pub enum BrowserCommand {
         y: i32,
         dx: i32,
         dy: i32,
+        modifiers: InputModifiers,
+    },
+    Key {
+        tab: TabId,
+        input: KeyInput,
+    },
+    Focus {
+        tab: TabId,
+        focused: bool,
     },
 }
 
@@ -80,19 +142,69 @@ pub enum BrowserEvent {
     Closed { tab: TabId },
 }
 
-/// An immutable BGRA8 CEF paint frame. Consumers may convert this to their own texture type.
+/// A rectangle in physical image pixels, with an origin at the top left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+impl DamageRect {
+    pub fn area(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
+    pub fn clipped(self, width: u32, height: u32) -> Option<Self> {
+        let x = self.x.min(width);
+        let y = self.y.min(height);
+        let right = self.x.saturating_add(self.width).min(width);
+        let bottom = self.y.saturating_add(self.height).min(height);
+        (right > x && bottom > y).then_some(Self {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        })
+    }
+}
+
+/// One tightly packed, row-major BGRA8 rectangle (no stride padding).
+#[derive(Debug)]
+pub struct FramePatch {
+    pub rect: DamageRect,
+    pub bgra: Vec<u8>,
+}
+
+/// Full replaces all pixels; Patches requires a previously delivered Full
+/// frame of the same size. Independent of either Slint or CEF.
+#[derive(Debug)]
+pub enum FramePayload {
+    /// Shared immutable BGRA8 snapshot; no extra full-frame copy at dispatch.
+    Full(std::sync::Arc<Vec<u8>>),
+    Patches(Vec<FramePatch>),
+}
+
 #[derive(Debug)]
 pub struct PageFrame {
     pub tab: TabId,
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    pub payload: FramePayload,
+}
+impl PageFrame {
+    pub fn transfer_bytes(&self) -> usize {
+        match &self.payload {
+            FramePayload::Full(bytes) => bytes.len(),
+            FramePayload::Patches(patches) => patches.iter().map(|p| p.bgra.len()).sum(),
+        }
+    }
 }
 
 #[derive(Default, Debug)]
 pub struct EngineUpdates {
     pub events: Vec<BrowserEvent>,
-    /// Each adapter should retain only its latest unconsumed frame per tab.
+    /// Exactly one coherent accumulated update per tab per poll.
     pub frames: Vec<PageFrame>,
 }
 
@@ -119,6 +231,8 @@ pub trait BrowserEngine {
         _x: i32,
         _y: i32,
         _action: PointerAction,
+        _button: Option<PointerButton>,
+        _modifiers: InputModifiers,
     ) -> Result<(), BrowserError> {
         Ok(())
     }
@@ -129,7 +243,14 @@ pub trait BrowserEngine {
         _y: i32,
         _dx: i32,
         _dy: i32,
+        _modifiers: InputModifiers,
     ) -> Result<(), BrowserError> {
+        Ok(())
+    }
+    fn key(&mut self, _id: TabId, _input: &KeyInput) -> Result<(), BrowserError> {
+        Ok(())
+    }
+    fn focus(&mut self, _id: TabId, _focused: bool) -> Result<(), BrowserError> {
         Ok(())
     }
     fn poll(&mut self) -> EngineUpdates {

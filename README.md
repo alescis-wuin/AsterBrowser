@@ -78,3 +78,19 @@ The CEF build can download and extract hundreds of megabytes; this is expected. 
 - `cargo check` with `--features cef` updates `Cargo.lock`. Commit the lockfile for reproducible builds.
 
 See [docs/P0-CEF.md](docs/P0-CEF.md), [docs/decisions.md](docs/decisions.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
+
+For OSR paint-rate controls, input latency diagnostics and A/B comparisons, see [docs/P0-PERFORMANCE.md](docs/P0-PERFORMANCE.md).
+
+## P0 input forwarding (experimental)
+
+See [docs/P0-INPUT.md](docs/P0-INPUT.md) for the independent JavaScript fixture, accepted inputs and runtime test checklist. Keyboard support uses Slint logical keys; native XKB scancodes, IME composition and CEF popup rendering are not yet complete.
+
+## Incremental OSR and adaptive pump (P0-DAMAGE-RENDERING)
+
+The experimental damage path compares CEF dirty rectangles against a persistent BGRA framebuffer, emits either full frames or incremental BGRA patches, and applies those patches to a retained Slint RGB pixel buffer. Unchanged paints do not cause Aster copies or presentation updates. CEF's message pump follows scheduling callbacks with a 33 ms maximum fallback interval, sampled by Slint's 8 ms UI timer.
+
+```sh
+ASTER_PERF=1 ASTER_OSR_FPS=60 ASTER_PUMP_MS=8 ASTER_PUMP_MAX_MS=33 cargo run --release -p aster-desktop --features cef
+```
+
+See [docs/P0-DAMAGE-RENDERING.md](docs/P0-DAMAGE-RENDERING.md) for validation, telemetry and copy-on-write limitations. Test manually using `tests/manual/damage.html`.

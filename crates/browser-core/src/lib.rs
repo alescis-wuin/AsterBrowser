@@ -93,13 +93,39 @@ impl<E: BrowserEngine> Browser<E> {
                     self.engine.resize(tab, width, height)?;
                 }
             }
-            BrowserCommand::Pointer { tab, x, y, action } => {
+            BrowserCommand::Pointer {
+                tab,
+                x,
+                y,
+                action,
+                button,
+                modifiers,
+            } => {
                 self.index(tab)?;
-                self.engine.pointer(tab, x, y, action)?;
+                self.engine.pointer(tab, x, y, action, button, modifiers)?;
             }
-            BrowserCommand::Scroll { tab, x, y, dx, dy } => {
+            BrowserCommand::Scroll {
+                tab,
+                x,
+                y,
+                dx,
+                dy,
+                modifiers,
+            } => {
                 self.index(tab)?;
-                self.engine.scroll(tab, x, y, dx, dy)?;
+                self.engine.scroll(tab, x, y, dx, dy, modifiers)?;
+            }
+            BrowserCommand::Key { tab, input } => {
+                self.index(tab)?;
+                if self.active == Some(tab) {
+                    self.engine.key(tab, &input)?;
+                }
+            }
+            BrowserCommand::Focus { tab, focused } => {
+                self.index(tab)?;
+                if self.active == Some(tab) {
+                    self.engine.focus(tab, focused)?;
+                }
             }
         }
         Ok(())
@@ -305,5 +331,72 @@ mod tests {
         let snapshot = browser.tick().snapshot;
         assert_eq!(snapshot.tabs[0].title, "Example");
         assert_eq!(snapshot.tabs[0].url, "https://example.org/");
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use browser_contracts::{BrowserKey, InputModifiers, KeyAction, KeyInput};
+    use std::{cell::RefCell, rc::Rc};
+
+    struct RecordingEngine(Rc<RefCell<Vec<TabId>>>);
+    impl BrowserEngine for RecordingEngine {
+        fn open(&mut self, _: TabId, _: &str) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn close(&mut self, _: TabId) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn navigate(&mut self, _: TabId, _: &str) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn back(&mut self, _: TabId) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn forward(&mut self, _: TabId) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn reload(&mut self, _: TabId) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn activate(&mut self, _: TabId) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        fn key(&mut self, id: TabId, _: &KeyInput) -> Result<(), BrowserError> {
+            self.0.borrow_mut().push(id);
+            Ok(())
+        }
+    }
+    #[test]
+    fn keyboard_input_targets_only_active_tab() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut browser = Browser::new(RecordingEngine(log.clone()));
+        for _ in 0..2 {
+            browser
+                .dispatch(BrowserCommand::NewTab {
+                    url: "about:blank".into(),
+                })
+                .unwrap();
+        }
+        let input = KeyInput {
+            key: BrowserKey::Text("a".into()),
+            action: KeyAction::Press,
+            modifiers: InputModifiers::default(),
+            repeat: false,
+        };
+        browser
+            .dispatch(BrowserCommand::Key {
+                tab: TabId(1),
+                input: input.clone(),
+            })
+            .unwrap();
+        browser
+            .dispatch(BrowserCommand::Key {
+                tab: TabId(2),
+                input,
+            })
+            .unwrap();
+        assert_eq!(log.borrow().as_slice(), &[TabId(2)]);
     }
 }
