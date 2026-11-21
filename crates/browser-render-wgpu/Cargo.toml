@@ -1,0 +1,9 @@
+[package]
+name = "browser-render-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+browser-contracts.workspace = true
+wgpu = "30"

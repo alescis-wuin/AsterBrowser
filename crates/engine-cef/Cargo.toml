@@ -7,7 +7,9 @@ license.workspace = true
 [features]
 default = []
 cef-runtime = ["dep:cef"]
+gpu = ["cef-runtime", "cef/accelerated_osr", "dep:browser-render-wgpu"]
 
 [dependencies]
 browser-contracts.workspace = true
 cef = { version = "=156.7.0", default-features = false, optional = true }
+browser-render-wgpu = { path = "../browser-render-wgpu", optional = true }

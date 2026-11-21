@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
+[features]
+default = []
+gpu = ["dep:browser-render-wgpu", "slint/unstable-wgpu-30", "slint/renderer-femtovg-wgpu"]
+
 [dependencies]
 slint = "=1.19.0"
 browser-contracts.workspace = true
+browser-render-wgpu = { path = "../browser-render-wgpu", optional = true }
 [build-dependencies]
 slint-build = "=1.19.0"

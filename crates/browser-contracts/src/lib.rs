@@ -170,7 +170,7 @@ impl DamageRect {
 }
 
 /// One tightly packed, row-major BGRA8 rectangle (no stride padding).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FramePatch {
     pub rect: DamageRect,
     pub bgra: Vec<u8>,
@@ -276,3 +276,6 @@ pub fn normalize_address(input: &str) -> String {
         format!("https://{value}")
     }
 }
+
+pub mod render_options;
+pub use render_options::{BufferCount, RenderMode, RenderOptions};
