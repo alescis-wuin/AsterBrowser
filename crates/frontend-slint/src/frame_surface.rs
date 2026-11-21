@@ -203,3 +203,130 @@ mod tests {
         );
     }
 }
+
+/// A ring of one or two independently presented RGB buffers. With two buffers,
+/// the inactive slot replays damage missed since it was last presented before
+/// becoming the front buffer. Immutable Slint Image snapshots stay valid; a
+/// copy-on-write can still occur if Slint retains an older image.
+pub(crate) struct BufferedRgbSurface {
+    slots: Vec<RgbSurface>,
+    front: usize,
+    pending_for_other: Vec<browser_contracts::FramePatch>,
+}
+
+impl BufferedRgbSurface {
+    pub fn from_frame(
+        frame: PageFrame,
+        buffers: browser_contracts::BufferCount,
+    ) -> Option<(Self, AppliedUpdate)> {
+        let (surface, update) = RgbSurface::from_frame(frame)?;
+        let mut slots = vec![surface];
+        if buffers.get() == 2 {
+            slots.push(RgbSurface {
+                pixels: slots[0].pixels.clone(),
+            });
+        }
+        Some((
+            Self {
+                slots,
+                front: 0,
+                pending_for_other: Vec::new(),
+            },
+            update,
+        ))
+    }
+
+    pub fn matches_size(&self, frame: &PageFrame) -> bool {
+        self.slots[self.front].matches_size(frame)
+    }
+
+    pub fn apply(&mut self, frame: PageFrame) -> Option<AppliedUpdate> {
+        if !self.matches_size(&frame) {
+            return None;
+        }
+        if self.slots.len() == 1 {
+            return self.slots[0].apply(frame);
+        }
+        let target = (self.front + 1) % 2;
+        match frame.payload {
+            FramePayload::Full(pixels) => {
+                let frame = PageFrame {
+                    tab: frame.tab,
+                    width: frame.width,
+                    height: frame.height,
+                    payload: FramePayload::Full(pixels),
+                };
+                let (surface, update) = Self::from_frame(frame, "2".parse().ok()?)?;
+                *self = surface;
+                Some(update)
+            }
+            FramePayload::Patches(patches) => {
+                if patches.is_empty() {
+                    return None;
+                }
+                // Do not consume backlog until all patches have been validated.
+                let mut update_patches = self.pending_for_other.clone();
+                update_patches.extend_from_slice(&patches);
+                let update = self.slots[target].apply(PageFrame {
+                    tab: frame.tab,
+                    width: frame.width,
+                    height: frame.height,
+                    payload: FramePayload::Patches(update_patches),
+                })?;
+                self.pending_for_other = patches;
+                self.front = target;
+                Some(update)
+            }
+        }
+    }
+
+    pub fn image(&self) -> Image {
+        self.slots[self.front].image()
+    }
+}
+
+#[cfg(test)]
+mod buffering_tests {
+    use super::*;
+    use browser_contracts::{DamageRect, FramePatch, TabId};
+    use std::sync::Arc;
+    fn full() -> PageFrame {
+        PageFrame {
+            tab: TabId(1),
+            width: 3,
+            height: 1,
+            payload: FramePayload::Full(Arc::new([0, 0, 0, 255].repeat(3))),
+        }
+    }
+    fn patch(x: u32, red: u8) -> PageFrame {
+        PageFrame {
+            tab: TabId(1),
+            width: 3,
+            height: 1,
+            payload: FramePayload::Patches(vec![FramePatch {
+                rect: DamageRect {
+                    x,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                bgra: vec![0, 0, red, 255],
+            }]),
+        }
+    }
+    #[test]
+    fn single_and_double_keep_all_intervening_pixels() {
+        for buffers in ["1", "2"] {
+            let (mut ring, _) =
+                BufferedRgbSurface::from_frame(full(), buffers.parse().unwrap()).unwrap();
+            let first = ring.image();
+            ring.apply(patch(0, 20)).unwrap();
+            ring.apply(patch(1, 30)).unwrap();
+            ring.apply(patch(2, 40)).unwrap();
+            let image = ring.image().to_rgb8().unwrap();
+            assert_eq!(&image.as_bytes()[..], &[20, 0, 0, 30, 0, 0, 40, 0, 0]);
+            // The previously presented image must remain unchanged.
+            assert_eq!(&first.to_rgb8().unwrap().as_bytes()[..], &[0; 9]);
+        }
+    }
+}

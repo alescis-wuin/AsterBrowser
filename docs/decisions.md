@@ -21,3 +21,9 @@ Every CEF browser is closed via `BrowserHost::close_browser` and acknowledged by
 # ADR-0005 — Replaceable frontends and mock preservation
 
 No dependency on `cef` exists inside `browser-contracts`, `browser-core` or `frontend-slint`. CEF is an opt-in Cargo feature, while the mock path is available without a native Chromium SDK.
+
+# ADR-0006 — Optional WGPU shared-texture presentation
+
+Decision: retain the CPU BGRA incremental renderer as the default and add an explicitly opted-in WGPU renderer behind the same browser-core contracts. Select one or two presentation buffers per tab at startup. The new `browser-render-wgpu` bridge is shared by the CEF adapter and any WGPU-capable frontend, but is not referenced by `browser-contracts` or `browser-core`.
+
+Tradeoff: CEF's upstream accelerated import performs a full GPU-to-GPU copy and waits for its completion. Aster's secondary RGBA8 presentation textures support GPU shader composition limited to dirty rectangles without CPU readback, but this is not zero GPU-copy. Two buffers may improve presentation isolation at the cost of an additional texture and catch-up GPU draws. Fall back to CPU when GPU import fails, and preserve sandboxing. Keep GPU integration optional until actual hybrid-Linux tests are successful.

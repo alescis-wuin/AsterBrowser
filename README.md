@@ -8,8 +8,9 @@ A modular, experimental Rust browser shell. P0 uses Slint as the replaceable UI 
 
 - `browser-contracts`: UI/engine-neutral commands, snapshots, events and BGRA paint frames.
 - `browser-core`: tab state machine, normalization, engine event application and testable mock engine.
-- `frontend-slint`: replaceable GUI, Slint widgets and BGRA-to-image conversion; it knows no CEF APIs.
-- `engine-cef`: CEF wrapper, renderer/client callbacks, event pump, per-tab OSR surfaces and close acknowledgments.
+- `frontend-slint`: replaceable GUI, Slint widgets, CPU image buffering and optional Slint WGPU presentation; it knows no CEF APIs.
+- `engine-cef`: CEF wrapper, renderer/client callbacks, event pump, per-tab OSR surfaces, DMA-BUF import and close acknowledgments.
+- `browser-render-wgpu`: optional backend-neutral WGPU texture bridge and incremental RGBA8 shader composition.
 - `aster-desktop`: composition root; selects mock or CEF at compile time.
 
 ## Requirements
@@ -70,11 +71,11 @@ The CEF build can download and extract hundreds of megabytes; this is expected. 
 ## Current limitations
 
 - The CEF path **has not been compiled or runtime-tested in the artifact authoring environment**. The actual desktop host must validate it before calling P0 complete.
-- OSR uses a CPU BGRA readback and copy per frame, capped at 4096x2160; GPU texture sharing is future work.
-- Mouse left-click and wheel are forwarded. Full keyboard input to web contents, right-click menus, popup/select surfaces, drag/drop and IME are not implemented.
+- The default CPU OSR path maintains incremental BGRA frames (maximum 4096x2160); experimental GPU DMA-BUF imports are available only with `--features cef-gpu` and compatible hardware.
+- Mouse clicks, wheel and basic keyboard navigation are forwarded. Native context menus, popup/select surfaces, drag/drop and IME are not complete.
 - CEF popup windows are not accepted/managed; the first version is for simple page/navigation testing.
 - CEF runtime resources, Linux sandbox and bundling need platform testing.
-- The event pump currently uses a 16ms polling timer, not an optimized event-driven `OnScheduleMessagePumpWork` implementation.
+- The message pump follows `OnScheduleMessagePumpWork` hints, sampled by a configurable Slint timer. It is not yet a fully event-driven wakeup mechanism.
 - `cargo check` with `--features cef` updates `Cargo.lock`. Commit the lockfile for reproducible builds.
 
 See [docs/P0-CEF.md](docs/P0-CEF.md), [docs/decisions.md](docs/decisions.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
@@ -94,3 +95,18 @@ ASTER_PERF=1 ASTER_OSR_FPS=60 ASTER_PUMP_MS=8 ASTER_PUMP_MAX_MS=33 cargo run --r
 ```
 
 See [docs/P0-DAMAGE-RENDERING.md](docs/P0-DAMAGE-RENDERING.md) for validation, telemetry and copy-on-write limitations. Test manually using `tests/manual/damage.html`.
+
+## Experimental CPU/GPU presentation (P0-GPU-BUFFERING)
+
+Set `--renderer cpu|gpu|auto` and `--buffers 1|2` at launch (or use
+`ASTER_RENDERER` and `ASTER_BUFFERS`). The default is the established CPU path
+with one buffer; the GPU renderer is optional and requires `--features cef-gpu`.
+
+The CPU path supports incremental dirty patches in one or two Slint image
+buffers. The GPU path uses shared CEF textures, **owned GPU import copies**,
+partial RGBA8 shader composition with scissor regions, and a same-device Slint WGPU renderer.
+GPU import is conditional on drivers and device compatibility and falls back
+to CPU OSR after failures. It is not fully zero-copy and remains experimental.
+
+See [docs/P0-GPU-BUFFERING.md](docs/P0-GPU-BUFFERING.md) for configuration,
+limitations, the GPU memory-copy distinction, test commands and acceptance gates.

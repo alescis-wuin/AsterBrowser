@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/browser-contracts", "crates/browser-core", "crates/frontend-slint", "crates/engine-cef", "apps/desktop"]
+members = ["crates/browser-contracts", "crates/browser-core", "crates/frontend-slint", "crates/engine-cef", "crates/browser-render-wgpu", "apps/desktop"]
 
 [workspace.package]
 edition = "2024"

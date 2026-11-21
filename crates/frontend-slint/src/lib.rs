@@ -1,10 +1,10 @@
 //! Slint frontend. No direct dependency on Chromium or browser-core.
 mod frame_surface;
 use browser_contracts::{
-    BrowserCommand, BrowserKey, BrowserSnapshot, BrowserTick, InputModifiers, KeyAction, KeyInput,
-    PageFrame, PointerAction, PointerButton, TabId,
+    BrowserCommand, BrowserKey, BrowserSnapshot, BrowserTick, BufferCount, InputModifiers,
+    KeyAction, KeyInput, PointerAction, PointerButton, TabId,
 };
-use frame_surface::{RgbSurface, UpdateKind};
+use frame_surface::{BufferedRgbSurface, UpdateKind};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
     cell::{Cell, RefCell},
@@ -13,6 +13,106 @@ use std::{
     time::{Duration, Instant},
 };
 slint::include_modules!();
+
+pub struct FrontendConfig {
+    pub buffers: BufferCount,
+    #[cfg(feature = "gpu")]
+    pub gpu: Option<browser_render_wgpu::GpuHub>,
+}
+impl FrontendConfig {
+    pub fn cpu(buffers: BufferCount) -> Self {
+        Self {
+            buffers,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+        }
+    }
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, hub: browser_render_wgpu::GpuHub) -> Self {
+        self.gpu = Some(hub);
+        self
+    }
+}
+
+/// Must be called before the first Slint window is created.
+#[cfg(feature = "gpu")]
+pub fn select_wgpu_renderer() -> Result<(), slint::PlatformError> {
+    use slint::wgpu_30::{WGPUConfiguration, WGPUSettings, wgpu};
+    let mut settings = WGPUSettings::default();
+    settings.backends = wgpu::Backends::VULKAN;
+    if std::env::var("ASTER_GPU_POWER").ok().as_deref() == Some("low") {
+        settings.power_preference = wgpu::PowerPreference::LowPower;
+    } else {
+        settings.power_preference = wgpu::PowerPreference::HighPerformance;
+    }
+    // The CEF DMA-BUF importer requires this device feature. Do not silently
+    // select a different GPU or backend if the shared-import path is unavailable.
+    #[cfg(target_os = "linux")]
+    {
+        settings.device_required_features |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+    }
+    slint::BackendSelector::new()
+        .require_wgpu_30(WGPUConfiguration::Automatic(settings))
+        .select()
+}
+
+#[cfg(feature = "gpu")]
+fn install_gpu_context(ui: &BrowserWindow, hub: browser_render_wgpu::GpuHub) {
+    let cloned = hub.clone();
+    let result = ui
+        .window()
+        .set_rendering_notifier(move |state, graphics_api| match state {
+            slint::RenderingState::RenderingSetup => {
+                if let slint::GraphicsAPI::WGPU30 { device, queue, .. } = graphics_api {
+                    cloned.set_device(device.clone(), queue.clone());
+                } else {
+                    cloned.fail("Slint did not provide a WGPU30 renderer");
+                }
+            }
+            slint::RenderingState::RenderingTeardown => cloned.clear(),
+            _ => {}
+        });
+    if let Err(error) = result {
+        hub.fail(format!("Slint WGPU rendering notifier failed: {error}"));
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn present_gpu_image(
+    ui: &BrowserWindow,
+    hub: &browser_render_wgpu::GpuHub,
+    active: Option<TabId>,
+    last_shown: &mut Option<(TabId, u64)>,
+) {
+    let Some(tab) = active else {
+        *last_shown = None;
+        return;
+    };
+    let Some(revision) = hub.revision(tab) else {
+        *last_shown = None;
+        return;
+    };
+    if *last_shown == Some((tab, revision)) {
+        return;
+    }
+    let Some(presented) = hub.current(tab) else {
+        return;
+    };
+    match slint::Image::try_from(presented.texture) {
+        Ok(image) => {
+            ui.set_page_image(image);
+            ui.set_has_page(true);
+            // With a single buffer the texture identity is stable. Request a
+            // new composition even if the image property's identity is reused.
+            ui.window().request_redraw();
+            *last_shown = Some((tab, presented.revision));
+        }
+        Err(error) => {
+            hub.fail(format!("Cannot display WGPU frame in Slint: {error:?}"));
+            *last_shown = None;
+        }
+    }
+}
 
 pub type Dispatcher = Rc<dyn Fn(BrowserCommand) -> BrowserSnapshot>;
 /// Dispatches high-frequency input without cloning tab state.
@@ -79,7 +179,7 @@ fn modifiers(shift: bool, control: bool, alt: bool, meta: bool) -> InputModifier
 fn render(
     ui: &BrowserWindow,
     snapshot: &BrowserSnapshot,
-    frames: &mut HashMap<TabId, RgbSurface>,
+    frames: &mut HashMap<TabId, BufferedRgbSurface>,
     shown_tab: &Cell<Option<TabId>>,
     engine_name: &str,
 ) {
@@ -116,7 +216,7 @@ fn apply_command(
     command: BrowserCommand,
     ui: &slint::Weak<BrowserWindow>,
     state: &Rc<RefCell<BrowserSnapshot>>,
-    frames: &Rc<RefCell<HashMap<TabId, RgbSurface>>>,
+    frames: &Rc<RefCell<HashMap<TabId, BufferedRgbSurface>>>,
     shown_tab: &Rc<Cell<Option<TabId>>>,
     dispatcher: &Dispatcher,
     engine_name: &str,
@@ -143,10 +243,19 @@ pub fn run(
     input_dispatcher: InputDispatcher,
     poller: Poller,
     engine_name: &'static str,
+    config: FrontendConfig,
 ) -> Result<(), slint::PlatformError> {
     let ui = BrowserWindow::new()?;
+    #[cfg(feature = "gpu")]
+    let gpu = config.gpu.clone();
+    #[cfg(feature = "gpu")]
+    if let Some(hub) = gpu.clone() {
+        install_gpu_context(&ui, hub);
+    }
+    #[cfg(feature = "gpu")]
+    let mut last_gpu_image: Option<(TabId, u64)> = None;
     let state = Rc::new(RefCell::new(initial));
-    let frames: Rc<RefCell<HashMap<TabId, RgbSurface>>> = Rc::default();
+    let frames: Rc<RefCell<HashMap<TabId, BufferedRgbSurface>>> = Rc::default();
     let shown_tab = Rc::new(Cell::new(None));
     render(
         &ui,
@@ -431,13 +540,13 @@ pub fn run(
                 if surface.matches_size(&frame) {
                     surface.apply(frame)
                 } else {
-                    RgbSurface::from_frame(frame).map(|(new, applied)| {
+                    BufferedRgbSurface::from_frame(frame, config.buffers).map(|(new, applied)| {
                         *surface = new;
                         applied
                     })
                 }
             } else {
-                RgbSurface::from_frame(frame).map(|(surface, applied)| {
+                BufferedRgbSurface::from_frame(frame, config.buffers).map(|(surface, applied)| {
                     image_cache.insert(id, surface);
                     applied
                 })
@@ -480,6 +589,11 @@ pub fn run(
             }
         }
         drop(image_cache);
+        #[cfg(feature = "gpu")]
+        if let Some(hub) = gpu.as_ref() {
+            present_gpu_image(&ui, hub, state.borrow().active, &mut last_gpu_image);
+            hub.report_if_due();
+        }
         let active = state.borrow().active;
         if let Some(tab) = active {
             let (width, height) = (ui.get_viewport_width(), ui.get_viewport_height());

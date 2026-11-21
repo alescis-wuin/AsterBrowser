@@ -6,7 +6,13 @@ use browser_contracts::{
     BrowserEngine, BrowserError, BrowserEvent, BrowserKey, DamageRect, EngineUpdates, FramePayload,
     InputModifiers, KeyAction, KeyInput, PointerAction, PointerButton, TabId,
 };
+#[cfg(feature = "gpu")]
+use browser_render_wgpu::GpuHub;
+#[cfg(feature = "gpu")]
+use cef::osr_texture_import::shared_texture_handle::SharedTextureHandle;
 use cef::*;
+#[cfg(feature = "gpu")]
+use std::collections::HashSet;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -169,8 +175,36 @@ wrap_browser_process_handler! {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_ozone_platform(
+    override_value: Option<&str>,
+    has_x11_display: bool,
+    has_wayland_display: bool,
+) -> Option<&'static str> {
+    match override_value {
+        Some("x11") => Some("x11"),
+        Some("wayland") => Some("wayland"),
+        Some("none") => None,
+        Some("auto") | None => {
+            if has_x11_display {
+                // CEF's Linux shared-texture OSR has historically had better
+                // coverage through X11/XWayland plus EGL/ANGLE.
+                Some("x11")
+            } else if has_wayland_display {
+                Some("wayland")
+            } else {
+                None
+            }
+        }
+        Some(_) => None, // Reject unsupported overrides rather than inventing a platform.
+    }
+}
+
 wrap_app! {
-    struct AsterApp { requests: PumpRequests, }
+    struct AsterApp {
+        requests: PumpRequests,
+        gpu_osr_requested: bool,
+    }
 
     impl App {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
@@ -185,6 +219,36 @@ wrap_app! {
             if let Some(command_line) = command_line {
                 // Do not create an additional Chromium window outside of Slint.
                 command_line.append_switch(Some(&"no-startup-window".into()));
+
+                // CEF's Linux accelerated OSR relies on EGL/ANGLE and a real
+                // Ozone display backend to export DMA-BUF textures. Respect
+                // explicitly provided Chromium switches; keep the CPU mode
+                // untouched and make the experiment opt-out for A/B testing.
+                #[cfg(target_os = "linux")]
+                if self.gpu_osr_requested
+                    && std::env::var("ASTER_CEF_GPU_COMPAT").ok().as_deref() != Some("0")
+                {
+                    if command_line.has_switch(Some(&"use-angle".into())) == 0 {
+                        command_line.append_switch_with_value(
+                            Some(&"use-angle".into()),
+                            Some(&"gl-egl".into()),
+                        );
+                    }
+                    let requested = std::env::var("ASTER_CEF_OZONE").ok();
+                    let ozone = linux_ozone_platform(
+                        requested.as_deref(),
+                        std::env::var_os("DISPLAY").is_some(),
+                        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+                    );
+                    if command_line.has_switch(Some(&"ozone-platform".into())) == 0 {
+                        if let Some(ozone) = ozone {
+                            command_line.append_switch_with_value(
+                                Some(&"ozone-platform".into()),
+                                Some(&CefString::from(ozone)),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -224,11 +288,11 @@ impl CefPumpHandle {
 }
 
 impl CefRuntime {
-    pub fn start() -> Result<CefStartup, BrowserError> {
+    pub fn start(gpu_osr_requested: bool) -> Result<CefStartup, BrowserError> {
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         let args = args::Args::new();
         let requests = PumpRequests::default();
-        let mut app = AsterApp::new(requests.clone());
+        let mut app = AsterApp::new(requests.clone(), gpu_osr_requested);
         let subprocess_status = execute_process(
             Some(args.as_main_args()),
             Some(&mut app),
@@ -236,6 +300,27 @@ impl CefRuntime {
         );
         if subprocess_status >= 0 {
             return Ok(CefStartup::SubprocessExit(subprocess_status));
+        }
+        #[cfg(target_os = "linux")]
+        if gpu_osr_requested {
+            let platform_override = std::env::var("ASTER_CEF_OZONE").ok();
+            let platform = linux_ozone_platform(
+                platform_override.as_deref(),
+                std::env::var_os("DISPLAY").is_some(),
+                std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            );
+            eprintln!(
+                "[aster:gpu] CEF Linux shared-texture mode: egl_ozone_compat={} ozone={:?} display={} wayland_display={}",
+                std::env::var("ASTER_CEF_GPU_COMPAT").ok().as_deref() != Some("0"),
+                platform,
+                std::env::var_os("DISPLAY").is_some(),
+                std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            );
+            if platform.is_none() {
+                eprintln!(
+                    "[aster:gpu] no usable X11/Wayland Ozone platform selected; shared-texture OSR may fail"
+                );
+            }
         }
         let settings = Settings {
             windowless_rendering_enabled: 1,
@@ -328,6 +413,12 @@ struct Mailbox {
     events: Vec<BrowserEvent>,
     surfaces: HashMap<TabId, DamageSurface>,
     stats: PaintStats,
+    #[cfg(feature = "gpu")]
+    gpu: Option<GpuHub>,
+    /// First successful accelerated presentation per native browser.
+    /// Deliberately independent of the GPU texture presentation cache.
+    #[cfg(feature = "gpu")]
+    gpu_first_frames: HashSet<TabId>,
 }
 
 wrap_render_handler! {
@@ -386,6 +477,58 @@ wrap_render_handler! {
                 let cpu = started.elapsed();
                 stats.cpu_time += cpu;
                 stats.cpu_max = stats.cpu_max.max(cpu);
+            }
+        }
+
+        // The accelerated OSR callback gives access to a borrowed shared
+        // DMA-BUF/D3D/IOSurface. cef-rs copies it into an owned WGPU texture
+        // while the callback is active, with native synchronization.
+        #[cfg(feature = "gpu")]
+        fn on_accelerated_paint(
+            &self,
+            _browser: Option<&mut Browser>,
+            paint_type: PaintElementType,
+            dirty_rects: Option<&[Rect]>,
+            info: Option<&AcceleratedPaintInfo>,
+        ) {
+            if paint_type != PaintElementType::default() { return; }
+            let Some(info) = info else { return; };
+            let hub = self.mailbox.borrow().gpu.clone();
+            let Some(hub) = hub else { return; };
+            let Some(ctx) = hub.device() else {
+                // Slint can temporarily tear down WGPU on window closure or
+                // renderer recreation. The timeout below decides whether a
+                // still-running browser must fall back to CPU.
+                if !hub.renderer_teardown_pending() {
+                    hub.fail("CEF accelerated frame arrived before Slint WGPU initialization");
+                }
+                return;
+            };
+            let started = Instant::now();
+            let importer = SharedTextureHandle::new(info);
+            // SAFETY: the handle is used only inside the originating CEF
+            // callback; cef-rs duplicates/copies the native resource and waits
+            // for the GPU copy before returning an owned texture.
+            let imported = unsafe { importer.import_texture(&ctx.device, &ctx.queue) };
+            match imported {
+                Ok(texture) => {
+                    let size = texture.size();
+                    let damage = paint_damage(dirty_rects, size.width, size.height);
+                    if let Err(error) = hub.present(self.tab, &texture, &damage) {
+                        hub.fail(format!("GPU presentation failed: {error}"));
+                    } else {
+                        // Only successful import + composition proves that CEF
+                        // produced an accelerated frame for this browser.
+                        let first = self.mailbox.borrow_mut().gpu_first_frames.insert(self.tab);
+                        if first && self.perf_enabled {
+                            eprintln!("[aster:gpu] first_valid_frame tab={}", self.tab.0);
+                        }
+                        if self.perf_enabled && started.elapsed() > Duration::from_millis(20) {
+                            eprintln!("[aster:gpu] slow_shared_import={:.2}ms", started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
+                }
+                Err(error) => hub.fail(format!("CEF GPU shared texture import failed: {error:?}")),
             }
         }
     }
@@ -455,6 +598,8 @@ wrap_life_span_handler! {
             self.pending.acknowledged();
             let mut mailbox = self.mailbox.borrow_mut();
             mailbox.surfaces.remove(&self.tab);
+            #[cfg(feature = "gpu")]
+            mailbox.gpu_first_frames.remove(&self.tab);
             mailbox.events.push(BrowserEvent::Closed { tab: self.tab });
         }
     }
@@ -479,6 +624,23 @@ wrap_client! {
 struct CefTab {
     browser: Browser,
     size: Rc<Cell<(u32, u32)>>,
+    url: String,
+    #[cfg(feature = "gpu")]
+    accelerated: bool,
+    #[cfg(feature = "gpu")]
+    opened_at: Instant,
+}
+
+#[cfg(feature = "gpu")]
+fn first_gpu_frame_timed_out(opened_at: Instant, first_frame_seen: bool, now: Instant) -> bool {
+    !first_frame_seen && now.saturating_duration_since(opened_at) > Duration::from_secs(8)
+}
+
+#[cfg(feature = "gpu")]
+struct DeferredTab {
+    url: String,
+    size: (u32, u32),
+    queued_at: Instant,
 }
 
 pub struct CefEngine {
@@ -486,6 +648,13 @@ pub struct CefEngine {
     mailbox: Rc<RefCell<Mailbox>>,
     pending: CloseTracker,
     perf_enabled: bool,
+    active: Option<TabId>,
+    #[cfg(feature = "gpu")]
+    gpu: Option<GpuHub>,
+    #[cfg(feature = "gpu")]
+    gpu_requested: bool,
+    #[cfg(feature = "gpu")]
+    deferred: HashMap<TabId, DeferredTab>,
 }
 
 impl Default for CefEngine {
@@ -495,6 +664,13 @@ impl Default for CefEngine {
             mailbox: Rc::default(),
             pending: CloseTracker::default(),
             perf_enabled: std::env::var("ASTER_PERF").ok().as_deref() == Some("1"),
+            active: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+            #[cfg(feature = "gpu")]
+            gpu_requested: false,
+            #[cfg(feature = "gpu")]
+            deferred: HashMap::new(),
         }
     }
 }
@@ -504,29 +680,34 @@ impl CefEngine {
         self.pending.clone()
     }
 
+    #[cfg(feature = "gpu")]
+    pub fn enable_gpu(&mut self, hub: GpuHub) {
+        self.mailbox.borrow_mut().gpu = Some(hub.clone());
+        self.gpu = Some(hub);
+        self.gpu_requested = true;
+    }
+
     fn tab(&self, id: TabId) -> Result<&CefTab, BrowserError> {
         self.tabs.get(&id).ok_or(BrowserError::TabNotFound(id))
     }
-}
 
-impl BrowserEngine for CefEngine {
-    fn open(&mut self, id: TabId, url: &str) -> Result<(), BrowserError> {
-        if self.tabs.contains_key(&id) {
-            return Err(BrowserError::Engine(format!(
-                "duplicate browser tab {}",
-                id.0
-            )));
-        }
-        let size = Rc::new(Cell::new((DEFAULT_WIDTH, DEFAULT_HEIGHT)));
+    fn open_native(
+        &mut self,
+        id: TabId,
+        url: &str,
+        initial_size: (u32, u32),
+        accelerated: bool,
+    ) -> Result<(), BrowserError> {
+        let size = Rc::new(Cell::new(initial_size));
         let mut client = AsterClient::new(
             AsterRenderHandler::new(id, size.clone(), self.mailbox.clone(), self.perf_enabled),
             AsterDisplayHandler::new(id, self.mailbox.clone()),
             AsterLoadHandler::new(id, self.mailbox.clone()),
             AsterLifeSpanHandler::new(id, self.mailbox.clone(), self.pending.clone()),
         );
-        // An OSR surface is composited into Slint, not into a native child window.
         let window = WindowInfo {
             windowless_rendering_enabled: 1,
+            shared_texture_enabled: accelerated as i32,
             ..Default::default()
         };
         let fps = osr_frame_rate(std::env::var("ASTER_OSR_FPS").ok().as_deref());
@@ -543,22 +724,197 @@ impl BrowserEngine for CefEngine {
             None,
         )
         .ok_or_else(|| BrowserError::Engine("CEF browser creation failed".into()))?;
-        self.tabs.insert(id, CefTab { browser, size });
+        self.tabs.insert(
+            id,
+            CefTab {
+                browser,
+                size,
+                url: url.into(),
+                #[cfg(feature = "gpu")]
+                accelerated,
+                #[cfg(feature = "gpu")]
+                opened_at: Instant::now(),
+            },
+        );
         Ok(())
     }
 
-    fn close(&mut self, id: TabId) -> Result<(), BrowserError> {
+    fn close_native(&mut self, id: TabId) -> Result<(), BrowserError> {
         let tab = self.tabs.remove(&id).ok_or(BrowserError::TabNotFound(id))?;
         if let Some(host) = tab.browser.host() {
             self.pending.begin();
-            // Forced close intentionally avoids leaving P0 blocked on JS beforeunload dialogs.
             host.close_browser(1);
         }
         self.mailbox.borrow_mut().surfaces.remove(&id);
+        #[cfg(feature = "gpu")]
+        {
+            self.mailbox.borrow_mut().gpu_first_frames.remove(&id);
+            if let Some(hub) = &self.gpu {
+                hub.remove(id);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn fall_back_to_cpu(&mut self, reason: &str) {
+        if !self.gpu_requested {
+            return;
+        }
+        eprintln!("[aster:gpu] GPU unavailable ({reason}); switching all browsers to CPU OSR");
+        self.gpu_requested = false;
+        if let Some(hub) = &self.gpu {
+            hub.clear();
+        }
+        let tabs: Vec<_> = self
+            .tabs
+            .iter()
+            .map(|(&id, tab)| {
+                (
+                    id,
+                    DeferredTab {
+                        url: tab.url.clone(),
+                        size: tab.size.get(),
+                        queued_at: Instant::now(),
+                    },
+                )
+            })
+            .collect();
+        for (id, deferred) in tabs {
+            self.deferred.insert(id, deferred);
+            let _ = self.close_native(id);
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn maintain_pending(&mut self) {
+        if let Some(hub) = self.gpu.clone() {
+            if let Some(reason) = hub.take_failure() {
+                self.fall_back_to_cpu(&reason);
+            }
+            if self.gpu_requested
+                && !hub.has_device()
+                && self
+                    .deferred
+                    .values()
+                    .any(|tab| tab.queued_at.elapsed() > Duration::from_secs(8))
+            {
+                self.fall_back_to_cpu("Slint WGPU device setup timed out");
+            }
+            // Slint's RenderingTeardown also occurs on normal window close.
+            // An immediate fallback would restart the browsers while the UI
+            // is exiting. Allow a short renderer-recreation window instead;
+            // a real unrecovered teardown still switches to the CPU path.
+            if self.gpu_requested
+                && !self.tabs.is_empty()
+                && hub.renderer_teardown_timed_out(Duration::from_secs(3))
+            {
+                self.fall_back_to_cpu("Slint WGPU renderer did not recover after teardown");
+            }
+            // Some Linux CEF configurations never produce accelerated paint.
+            // Do not leave a permanently blank page in that case.
+            let first_frame_timed_out = {
+                let mailbox = self.mailbox.borrow();
+                self.gpu_requested
+                    && self.tabs.iter().any(|(&id, tab)| {
+                        self.active == Some(id)
+                            && tab.accelerated
+                            && first_gpu_frame_timed_out(
+                                tab.opened_at,
+                                mailbox.gpu_first_frames.contains(&id),
+                                Instant::now(),
+                            )
+                    })
+            };
+            if first_frame_timed_out {
+                self.fall_back_to_cpu("no first successful accelerated paint within 8 seconds");
+            }
+        }
+        // Do not recreate a tab until all old OnBeforeClose callbacks finished.
+        if self.pending.remaining() > 0 {
+            return;
+        }
+        let ready = !self.gpu_requested || self.gpu.as_ref().is_some_and(GpuHub::has_device);
+        if !ready {
+            return;
+        }
+        for (id, deferred) in std::mem::take(&mut self.deferred) {
+            if let Err(error) =
+                self.open_native(id, &deferred.url, deferred.size, self.gpu_requested)
+            {
+                eprintln!("[aster:cef] deferred browser {id:?} could not start: {error}");
+            }
+        }
+        if let Some(active) = self.active {
+            for (&id, tab) in &self.tabs {
+                if let Some(host) = tab.browser.host() {
+                    host.was_hidden((id != active) as i32);
+                    host.set_focus((id == active) as i32);
+                }
+            }
+        }
+    }
+}
+
+impl BrowserEngine for CefEngine {
+    fn open(&mut self, id: TabId, url: &str) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Err(BrowserError::Engine("duplicate deferred tab".into()));
+        }
+        if self.tabs.contains_key(&id) {
+            return Err(BrowserError::Engine("duplicate browser tab".into()));
+        }
+        #[cfg(feature = "gpu")]
+        if self.gpu_requested && !self.gpu.as_ref().is_some_and(GpuHub::has_device) {
+            self.deferred.insert(
+                id,
+                DeferredTab {
+                    url: url.into(),
+                    size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                    queued_at: Instant::now(),
+                },
+            );
+            return Ok(());
+        }
+        let accelerated = {
+            #[cfg(feature = "gpu")]
+            {
+                self.gpu_requested
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                false
+            }
+        };
+        self.open_native(id, url, (DEFAULT_WIDTH, DEFAULT_HEIGHT), accelerated)
+    }
+
+    fn close(&mut self, id: TabId) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.remove(&id).is_some() {
+            if self.active == Some(id) {
+                self.active = None;
+            }
+            return Ok(());
+        }
+        self.close_native(id)?;
+        if self.active == Some(id) {
+            self.active = None;
+        }
         Ok(())
     }
 
     fn navigate(&mut self, id: TabId, url: &str) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if let Some(deferred) = self.deferred.get_mut(&id) {
+            deferred.url = url.into();
+            return Ok(());
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            tab.url = url.into();
+        }
         let browser = &self.tab(id)?.browser;
         if let Some(frame) = browser.main_frame() {
             frame.load_url(Some(&CefString::from(url)));
@@ -566,19 +922,37 @@ impl BrowserEngine for CefEngine {
         Ok(())
     }
     fn back(&mut self, id: TabId) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         self.tab(id)?.browser.go_back();
         Ok(())
     }
     fn forward(&mut self, id: TabId) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         self.tab(id)?.browser.go_forward();
         Ok(())
     }
     fn reload(&mut self, id: TabId) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         self.tab(id)?.browser.reload();
         Ok(())
     }
     fn activate(&mut self, id: TabId) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if !self.deferred.contains_key(&id) {
+            self.tab(id)?;
+        }
+        #[cfg(not(feature = "gpu"))]
         self.tab(id)?;
+        self.active = Some(id);
         for (&tab_id, tab) in &self.tabs {
             if let Some(host) = tab.browser.host() {
                 let active = tab_id == id;
@@ -592,6 +966,11 @@ impl BrowserEngine for CefEngine {
         Ok(())
     }
     fn resize(&mut self, id: TabId, width: u32, height: u32) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if let Some(deferred) = self.deferred.get_mut(&id) {
+            deferred.size = (width.clamp(1, 4096), height.clamp(1, 2160));
+            return Ok(());
+        }
         let tab = self.tab(id)?;
         let size = (width.clamp(1, 4096), height.clamp(1, 2160));
         if tab.size.get() != size {
@@ -611,6 +990,10 @@ impl BrowserEngine for CefEngine {
         button: Option<PointerButton>,
         modifiers: InputModifiers,
     ) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         let tab = self.tab(id)?;
         if let Some(host) = tab.browser.host() {
             let event = MouseEvent {
@@ -654,6 +1037,10 @@ impl BrowserEngine for CefEngine {
         dy: i32,
         modifiers: InputModifiers,
     ) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         let tab = self.tab(id)?;
         if let Some(host) = tab.browser.host() {
             let event = MouseEvent {
@@ -667,12 +1054,20 @@ impl BrowserEngine for CefEngine {
         Ok(())
     }
     fn focus(&mut self, id: TabId, focused: bool) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         if let Some(host) = self.tab(id)?.browser.host() {
             host.set_focus(focused as i32);
         }
         Ok(())
     }
     fn key(&mut self, id: TabId, input: &KeyInput) -> Result<(), BrowserError> {
+        #[cfg(feature = "gpu")]
+        if self.deferred.contains_key(&id) {
+            return Ok(());
+        }
         let Some(mut host) = self.tab(id)?.browser.host() else {
             return Ok(());
         };
@@ -725,6 +1120,8 @@ impl BrowserEngine for CefEngine {
         Ok(())
     }
     fn poll(&mut self) -> EngineUpdates {
+        #[cfg(feature = "gpu")]
+        self.maintain_pending();
         let mut mailbox = self.mailbox.borrow_mut();
         let frames: Vec<_> = mailbox
             .surfaces
@@ -760,6 +1157,14 @@ impl BrowserEngine for CefEngine {
                         stats.cpu_max.as_secs_f64() * 1000.0,
                     );
                     mailbox.stats = PaintStats::default();
+                }
+            }
+        }
+        // Keep the native tab's latest URL for recovery after GPU failure.
+        for event in &mailbox.events {
+            if let BrowserEvent::UrlChanged { tab, url } = event {
+                if let Some(native) = self.tabs.get_mut(tab) {
+                    native.url = url.clone();
                 }
             }
         }
@@ -805,5 +1210,68 @@ mod damage_rect_tests {
                 height: 4
             }]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_gpu_platform_tests {
+    use super::linux_ozone_platform;
+
+    #[test]
+    fn prefers_x11_for_linux_shared_textures_when_xwayland_exists() {
+        assert_eq!(linux_ozone_platform(None, true, true), Some("x11"));
+        assert_eq!(linux_ozone_platform(Some("auto"), true, true), Some("x11"));
+    }
+
+    #[test]
+    fn allows_wayland_or_no_override_for_diagnostics() {
+        assert_eq!(linux_ozone_platform(None, false, true), Some("wayland"));
+        assert_eq!(
+            linux_ozone_platform(Some("wayland"), true, true),
+            Some("wayland")
+        );
+        assert_eq!(linux_ozone_platform(Some("none"), true, true), None);
+        assert_eq!(linux_ozone_platform(None, false, false), None);
+        assert_eq!(linux_ozone_platform(Some("invalid"), true, true), None);
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod gpu_first_frame_watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn successful_accelerated_paint_prevents_false_timeout() {
+        let now = Instant::now();
+        assert!(!first_gpu_frame_timed_out(
+            now - Duration::from_secs(20),
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn missing_first_frame_times_out_after_eight_seconds() {
+        let now = Instant::now();
+        assert!(!first_gpu_frame_timed_out(
+            now - Duration::from_secs(7),
+            false,
+            now
+        ));
+        assert!(first_gpu_frame_timed_out(
+            now - Duration::from_secs(9),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn previously_painted_static_page_never_triggers_startup_timeout() {
+        let now = Instant::now();
+        assert!(!first_gpu_frame_timed_out(
+            now - Duration::from_secs(300),
+            true,
+            now
+        ));
     }
 }

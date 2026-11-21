@@ -7,9 +7,11 @@ license.workspace = true
 [features]
 default = []
 cef = ["dep:engine-cef", "engine-cef/cef-runtime"]
+cef-gpu = ["cef", "engine-cef/gpu", "frontend-slint/gpu", "dep:browser-render-wgpu"]
 
 [dependencies]
 browser-contracts.workspace = true
 browser-core.workspace = true
 frontend-slint.workspace = true
 engine-cef = { path = "../../crates/engine-cef", optional = true }
+browser-render-wgpu = { path = "../../crates/browser-render-wgpu", optional = true }
