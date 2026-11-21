@@ -3,5 +3,11 @@ name = "engine-cef"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = []
+cef-runtime = ["dep:cef"]
+
 [dependencies]
 browser-contracts.workspace = true
+cef = { version = "=156.7.0", default-features = false, optional = true }

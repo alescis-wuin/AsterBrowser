@@ -6,17 +6,13 @@ export struct TabView {
     active: bool,
 }
 
-component IconButton inherits Rectangle {
+component ToolbarButton inherits Rectangle {
     in property <string> label;
     callback clicked();
-
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     border-radius: 8px;
-    border-width: 1px;
-    border-color: #3a4353;
-    background: touch.pressed ? #3a4353 : #252b36;
-
+    background: hit.pressed ? #384353 : (hit.has-hover ? #303946 : #252b36);
     Text {
         text: root.label;
         color: #e5e7eb;
@@ -24,10 +20,7 @@ component IconButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
+    hit := TouchArea { clicked => { root.clicked(); } }
 }
 
 component TabChip inherits Rectangle {
@@ -35,53 +28,44 @@ component TabChip inherits Rectangle {
     in property <bool> active;
     callback activated();
     callback closed();
-
     width: 190px;
-    height: 34px;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: active ? #5b8cff : #303846;
-    background: active ? #2b3342 : #1b2029;
+    height: 36px;
+    border-radius: 9px;
+    background: root.active ? #303d52 : #202733;
+    border-width: root.active ? 1px : 0px;
+    border-color: #5689de;
 
+    // The tab activation area sits *under* the close button.
+    activate-hit := TouchArea { clicked => { root.activated(); } }
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 6px;
-        spacing: 6px;
-
+        padding-left: 11px;
+        padding-right: 7px;
+        spacing: 5px;
         Text {
             text: root.title;
-            color: active ? #ffffff : #d1d5db;
+            color: root.active ? #ffffff : #bcc8dc;
             overflow: elide;
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
-
-        close-area := Rectangle {
-            width: 24px;
-            height: 24px;
-            border-radius: 6px;
-            background: close-touch.pressed ? #4b5563 : #00000000;
-
+        Rectangle {
+            width: 22px;
+            height: 22px;
+            border-radius: 5px;
+            background: close-hit.has-hover ? #52627b : #00000000;
             Text {
                 text: "×";
-                color: #cbd5e1;
+                color: #e1e8f4;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-
-            close-touch := TouchArea {
-                clicked => { root.closed(); }
-            }
+            close-hit := TouchArea { clicked => { root.closed(); } }
         }
-    }
-
-    tab-touch := TouchArea {
-        clicked => { root.activated(); }
     }
 }
 
 export component BrowserWindow inherits Window {
-    title: "Aster — Prototype P0";
+    title: "Aster Browser — P0 Chromium";
     preferred-width: 1120px;
     preferred-height: 740px;
     min-width: 650px;
@@ -91,6 +75,10 @@ export component BrowserWindow inherits Window {
     in property <[TabView]> tabs;
     in property <string> current-url;
     in property <string> status-text;
+    in property <image> page-image;
+    in property <bool> has-page;
+    out property <int> viewport-width: page-surface.width / 1px;
+    out property <int> viewport-height: page-surface.height / 1px;
 
     callback add-tab();
     callback close-tab(int);
@@ -99,117 +87,87 @@ export component BrowserWindow inherits Window {
     callback back();
     callback forward();
     callback reload();
+    callback page-pointer(int, int, int); // x, y, action: 0=down, 1=up, 2=move
+    callback page-scroll(int, int, int, int); // x, y, dx, dy
 
     VerticalLayout {
         spacing: 0px;
-
         Rectangle {
-            height: 46px;
-            background: #181c22;
-
+            height: 47px;
+            background: #181d25;
             HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
-                padding-top: 6px;
-                padding-bottom: 6px;
+                padding-top: 5px;
+                padding-bottom: 5px;
                 spacing: 6px;
-
                 for tab in tabs: TabChip {
                     title: tab.title;
                     active: tab.active;
                     activated => { root.select-tab(tab.id); }
                     closed => { root.close-tab(tab.id); }
                 }
-
-                Rectangle {
-                    width: 8px;
-                    background: #00000000;
-                }
-
-                IconButton {
-                    label: "+";
-                    clicked => { root.add-tab(); }
-                }
+                ToolbarButton { label: "+"; clicked => { root.add-tab(); } }
             }
         }
-
         Rectangle {
             height: 52px;
-            background: #11161d;
-            border-width: 0px;
-
+            background: #141b24;
             HorizontalLayout {
                 padding: 8px;
                 spacing: 8px;
-
-                IconButton {
-                    label: "←";
-                    clicked => { root.back(); }
-                }
-
-                IconButton {
-                    label: "→";
-                    clicked => { root.forward(); }
-                }
-
-                IconButton {
-                    label: "↻";
-                    clicked => { root.reload(); }
-                }
-
+                ToolbarButton { label: "←"; clicked => { root.back(); } }
+                ToolbarButton { label: "→"; clicked => { root.forward(); } }
+                ToolbarButton { label: "↻"; clicked => { root.reload(); } }
                 address := LineEdit {
                     text: root.current-url;
                     horizontal-stretch: 1;
                     accepted => { root.navigate(self.text); }
                 }
-
-                Rectangle {
-                    width: 70px;
-                    height: 32px;
-                    border-radius: 8px;
-                    border-width: 1px;
-                    border-color: #3a4353;
-                    background: go-touch.pressed ? #3a4353 : #2563eb;
-
-                    Text {
-                        text: "Aller";
-                        color: #ffffff;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    go-touch := TouchArea {
-                        clicked => { root.navigate(address.text); }
-                    }
-                }
+                ToolbarButton { label: "Go"; clicked => { root.navigate(address.text); } }
             }
         }
-
-        Rectangle {
+        page-surface := Rectangle {
             background: #0f1318;
             vertical-stretch: 1;
-
+            Image {
+                visible: root.has-page;
+                source: root.page-image;
+                image-fit: fill;
+                width: parent.width;
+                height: parent.height;
+            }
             VerticalLayout {
+                visible: !root.has-page;
                 alignment: center;
                 spacing: 12px;
-
                 Text {
                     text: "Aster Browser";
                     font-size: 30px;
                     color: #e5e7eb;
                     horizontal-alignment: center;
                 }
-
-                Text {
-                    text: "Prototype d’interface — surface Chromium non intégrée";
-                    color: #94a3b8;
-                    horizontal-alignment: center;
-                }
-
                 Text {
                     text: root.status-text;
                     color: #94a3b8;
                     horizontal-alignment: center;
+                }
+            }
+            page-hit := TouchArea {
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left) {
+                        if (event.kind == PointerEventKind.down) {
+                            root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 0);
+                        } else if (event.kind == PointerEventKind.up) {
+                            root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 1);
+                        }
+                    }
+                }
+                moved => { root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 2); }
+                scroll-event(event) => {
+                    root.page-scroll(self.mouse-x / 1px, self.mouse-y / 1px,
+                        event.delta-x / 1px, -event.delta-y / 1px);
+                    accept
                 }
             }
         }
