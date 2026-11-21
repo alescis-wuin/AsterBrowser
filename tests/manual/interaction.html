@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aster input fixture</title>
+  <style>
+    :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
+    body { background: #111827; color: #e5e7eb; padding: 32px; max-width: 750px; margin: auto; }
+    button, input { font: inherit; padding: 12px; border-radius: 8px; margin: 8px 0; }
+    button { background: #2563eb; color: white; border: 0; cursor: pointer; }
+    input { width: 90%; background: #1f2937; color: white; border: 1px solid #64748b; }
+    output, pre { display: block; padding: 12px; background: #1f2937; border-radius: 8px; }
+    .spacer { height: 700px; }
+  </style>
+</head>
+<body>
+  <h1>Aster browser input fixture</h1>
+  <p id="runtime">JavaScript not executed</p>
+  <p>Clock: <output id="clock">0</output></p>
+  <button id="increment" type="button">Click to increment</button>
+  <output id="clicks">Clicks: 0</output>
+  <label for="text">Type text and press Enter</label>
+  <input id="text" placeholder="Type here (keyboard and focus test)">
+  <output id="typed">Keyboard input: none</output>
+  <p>Last pointer event: <output id="pointer">none</output></p>
+  <div class="spacer">Scroll down to find another button.</div>
+  <button id="bottom" type="button">Bottom button</button>
+  <script>
+    const show = (id, value) => document.getElementById(id).textContent = value;
+    let clicks = 0;
+    show('runtime', 'JavaScript executed: yes');
+    document.title = 'Aster: JavaScript active';
+    document.getElementById('increment').addEventListener('click', () => {
+      show('clicks', `Clicks: ${++clicks}`);
+    });
+    document.getElementById('text').addEventListener('input', event => {
+      show('typed', `Keyboard input: ${event.target.value}`);
+    });
+    document.getElementById('text').addEventListener('keydown', event => {
+      if (event.key === 'Enter') show('typed', `Enter pressed: ${event.target.value}`);
+    });
+    document.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      show('pointer', `Context menu event at ${event.clientX}, ${event.clientY}`);
+    });
+    document.getElementById('bottom').addEventListener('click', () => {
+      show('pointer', 'Bottom button clicked');
+    });
+    let ticks = 0;
+    setInterval(() => show('clock', String(++ticks)), 1000);
+  </script>
+</body>
+</html>

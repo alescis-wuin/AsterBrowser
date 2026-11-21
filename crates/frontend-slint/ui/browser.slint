@@ -87,8 +87,12 @@ export component BrowserWindow inherits Window {
     callback back();
     callback forward();
     callback reload();
-    callback page-pointer(int, int, int); // x, y, action: 0=down, 1=up, 2=move
-    callback page-scroll(int, int, int, int); // x, y, dx, dy
+    // x, y, action (0=down,1=up,2=move,3=cancel), button (0=none,1=left,2=right,3=middle), modifiers
+    callback page-pointer(int, int, int, int, bool, bool, bool, bool);
+    callback page-scroll(int, int, int, int, bool, bool, bool, bool);
+    // key text, action (0=press,1=release), modifiers, repeat
+    callback page-key(string, int, bool, bool, bool, bool, bool);
+    callback page-focus(bool);
 
     VerticalLayout {
         spacing: 0px;
@@ -153,21 +157,75 @@ export component BrowserWindow inherits Window {
                     horizontal-alignment: center;
                 }
             }
-            page-hit := TouchArea {
-                pointer-event(event) => {
-                    if (event.button == PointerEventButton.left) {
+            page-focus-scope := FocusScope {
+                width: parent.width;
+                height: parent.height;
+                focus-on-tab-navigation: false;
+                focus-on-click: false;
+                focus-gained(reason) => { root.page-focus(true); }
+                focus-lost(reason) => { root.page-focus(false); }
+                key-pressed(event) => {
+                    root.page-key(event.text, 0, event.modifiers.shift,
+                                  event.modifiers.control, event.modifiers.alt,
+                                  event.modifiers.meta, event.repeat);
+                    accept
+                }
+                key-released(event) => {
+                    root.page-key(event.text, 1, event.modifiers.shift,
+                                  event.modifiers.control, event.modifiers.alt,
+                                  event.modifiers.meta, false);
+                    accept
+                }
+
+                page-hit := TouchArea {
+                    property <int> pressed-button: 0;
+                    property <bool> pointer-shift: false;
+                    property <bool> pointer-control: false;
+                    property <bool> pointer-alt: false;
+                    property <bool> pointer-meta: false;
+                    pointer-event(event) => {
                         if (event.kind == PointerEventKind.down) {
-                            root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 0);
+                            page-focus-scope.focus();
+                            self.pointer-shift = event.modifiers.shift;
+                            self.pointer-control = event.modifiers.control;
+                            self.pointer-alt = event.modifiers.alt;
+                            self.pointer-meta = event.modifiers.meta;
+                            if (event.button == PointerEventButton.left) { self.pressed-button = 1; }
+                            else if (event.button == PointerEventButton.right) { self.pressed-button = 2; }
+                            else if (event.button == PointerEventButton.middle) { self.pressed-button = 3; }
+                            if (self.pressed-button > 0) {
+                                root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                                  0, self.pressed-button,
+                                                  event.modifiers.shift, event.modifiers.control,
+                                                  event.modifiers.alt, event.modifiers.meta);
+                            }
                         } else if (event.kind == PointerEventKind.up) {
-                            root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 1);
+                            if (self.pressed-button > 0) {
+                                root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                                  1, self.pressed-button,
+                                                  event.modifiers.shift, event.modifiers.control,
+                                                  event.modifiers.alt, event.modifiers.meta);
+                            }
+                            self.pressed-button = 0;
+                        } else if (event.kind == PointerEventKind.cancel) {
+                            root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                              3, 0, false, false, false, false);
+                            self.pressed-button = 0;
                         }
                     }
-                }
-                moved => { root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 2); }
-                scroll-event(event) => {
-                    root.page-scroll(self.mouse-x / 1px, self.mouse-y / 1px,
-                        event.delta-x / 1px, -event.delta-y / 1px);
-                    accept
+                    moved => {
+                        root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                          2, self.pressed-button,
+                                          self.pointer-shift, self.pointer-control,
+                                          self.pointer-alt, self.pointer-meta);
+                    }
+                    scroll-event(event) => {
+                        root.page-scroll(self.mouse-x / 1px, self.mouse-y / 1px,
+                                         event.delta-x / 1px, event.delta-y / 1px,
+                                         event.modifiers.shift, event.modifiers.control,
+                                         event.modifiers.alt, event.modifiers.meta);
+                        accept
+                    }
                 }
             }
         }

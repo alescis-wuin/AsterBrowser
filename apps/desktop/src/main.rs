@@ -1,6 +1,10 @@
 //! Composition root. Neither browser-core nor frontend-slint knows about CEF.
-use browser_contracts::{BrowserCommand, BrowserEngine, BrowserSnapshot};
-use browser_core::{Browser, MockEngine};
+#[cfg(not(feature = "cef"))]
+use browser_contracts::BrowserSnapshot;
+use browser_contracts::{BrowserCommand, BrowserEngine};
+use browser_core::Browser;
+#[cfg(not(feature = "cef"))]
+use browser_core::MockEngine;
 use std::{cell::RefCell, rc::Rc};
 
 fn dispatch_for<E: BrowserEngine + 'static>(
@@ -16,6 +20,18 @@ fn dispatch_for<E: BrowserEngine + 'static>(
     })
 }
 
+fn input_for<E: BrowserEngine + 'static>(
+    browser: &Rc<RefCell<Browser<E>>>,
+) -> frontend_slint::InputDispatcher {
+    let browser = Rc::clone(browser);
+    Rc::new(move |command| {
+        if let Err(error) = browser.borrow_mut().dispatch(command) {
+            eprintln!("browser input failed: {error}");
+        }
+    })
+}
+
+#[cfg(not(feature = "cef"))]
 fn run_mock() -> Result<(), Box<dyn std::error::Error>> {
     let mut browser = Browser::new(MockEngine::default());
     browser.dispatch(BrowserCommand::NewTab {
@@ -24,11 +40,12 @@ fn run_mock() -> Result<(), Box<dyn std::error::Error>> {
     let initial: BrowserSnapshot = browser.snapshot();
     let shared = Rc::new(RefCell::new(browser));
     let dispatcher = dispatch_for(&shared);
+    let input_dispatcher = input_for(&shared);
     let poller: frontend_slint::Poller = {
         let shared = Rc::clone(&shared);
         Rc::new(move || shared.borrow_mut().tick())
     };
-    frontend_slint::run(initial, dispatcher, poller, "Mock engine")?;
+    frontend_slint::run(initial, dispatcher, input_dispatcher, poller, "Mock engine")?;
     shared.borrow_mut().close_all()?;
     Ok(())
 }
@@ -50,15 +67,23 @@ fn run_cef() -> Result<(), Box<dyn std::error::Error>> {
     let initial = browser.snapshot();
     let shared = Rc::new(RefCell::new(browser));
     let dispatcher = dispatch_for(&shared);
+    let input_dispatcher = input_for(&shared);
     let poller: frontend_slint::Poller = {
         let shared = Rc::clone(&shared);
+        let pump = runtime.pump_handle();
         Rc::new(move || {
-            CefRuntime::pump();
+            pump.pump_if_due();
             shared.borrow_mut().tick()
         })
     };
 
-    let ui_result = frontend_slint::run(initial, dispatcher, poller, "Chromium / CEF");
+    let ui_result = frontend_slint::run(
+        initial,
+        dispatcher,
+        input_dispatcher,
+        poller,
+        "Chromium / CEF",
+    );
     // The renderer is allowed to finish its asynchronous OnBeforeClose callbacks
     // before the CEF library is shut down. This also runs after a UI error.
     let close_result = shared.borrow_mut().close_all();

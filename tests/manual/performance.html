@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aster: performance fixture</title>
+  <style>
+    :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
+    body { background: #121926; color: #edf2fa; max-width: 960px; margin: 0 auto; padding: 24px; }
+    .stat { display: inline-block; min-width: 210px; margin: 6px 8px 6px 0; padding: 16px; background: #222d3d; border-radius: 10px; }
+    strong { display: block; font-size: 22px; margin-top: 7px; }
+    .track { position: relative; height: 75px; background: #202b3b; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+    .marker { position: absolute; top: 17px; left: 0; width: 42px; height: 42px; border-radius: 8px; background: #5b9bff; }
+    button, input { padding: 12px; background: #253951; color: #edf2fa; border: 1px solid #586d87; border-radius: 8px; }
+    button { cursor: pointer; }
+    .space { height: 1100px; border-left: 2px dashed #475670; margin-top: 30px; padding: 15px; }
+    small { color: #aebdd1; }
+  </style>
+</head>
+<body>
+  <h1>Aster OSR performance fixture</h1>
+  <small>Local test. JavaScript rAF frequency is not the number of frames displayed by Slint.</small>
+  <section>
+    <div class="stat">JavaScript rAF callbacks/s <strong id="fps">-</strong></div>
+    <div class="stat">Intervals above 33 ms <strong id="slow">-</strong></div>
+    <div class="stat">Longest rAF interval <strong id="longest">-</strong></div>
+    <div class="stat">Mouse button responses <strong id="clicks">0</strong></div>
+    <div class="stat">Wheel events <strong id="wheels">0</strong></div>
+  </section>
+  <div class="track" id="track"><div class="marker" id="marker"></div></div>
+  <button id="button" type="button">Test button</button>
+  <input aria-label="Typing test" placeholder="Test typing latency">
+  <div class="space">Scroll down and up. Wheel direction should match normal websites.</div>
+  <div id="bottom">Bottom of test page</div>
+  <script>
+    let previous = null;
+    let count = 0;
+    let slow = 0;
+    let maxGap = 0;
+    let lastReport = performance.now();
+    const fps = document.getElementById('fps');
+    const slowDisplay = document.getElementById('slow');
+    const longest = document.getElementById('longest');
+    const marker = document.getElementById('marker');
+    const track = document.getElementById('track');
+    function frame(now) {
+      count += 1;
+      if (previous !== null) {
+        const gap = now - previous;
+        if (gap > 33) slow += 1;
+        maxGap = Math.max(maxGap, gap);
+      }
+      previous = now;
+      const distance = Math.max(0, track.clientWidth - marker.offsetWidth);
+      marker.style.transform = `translateX(${distance * (0.5 + 0.5 * Math.sin(now / 450))}px)`;
+      const elapsed = now - lastReport;
+      if (elapsed >= 2000) {
+        fps.textContent = (count * 1000 / elapsed).toFixed(1);
+        slowDisplay.textContent = String(slow);
+        longest.textContent = `${maxGap.toFixed(1)} ms`;
+        count = 0; slow = 0; maxGap = 0; lastReport = now;
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    let clicks = 0;
+    document.getElementById('button').addEventListener('click', () => {
+      document.getElementById('clicks').textContent = String(++clicks);
+    });
+    let wheels = 0;
+    document.addEventListener('wheel', () => {
+      document.getElementById('wheels').textContent = String(++wheels);
+    }, { passive: true });
+  </script>
+</body>
+</html>

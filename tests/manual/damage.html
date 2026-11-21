@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aster - Damage rendering test</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 28px; background: #101827; color: #e5efff; font: 16px/1.5 system-ui, sans-serif; }
+  button { padding: 10px 18px; margin: 4px; cursor: pointer; color: white; background: #2369ca; border: 0; border-radius: 7px; }
+  main { max-width: 800px; }
+  #stage { position: relative; background: #1d293d; border: 1px solid #43506a; width: min(100%, 740px); height: 330px; margin: 24px 0; overflow: hidden; }
+  #square { position: absolute; left: 40px; top: 120px; background: #70b5ff; width: 48px; height: 48px; border-radius: 8px; }
+  #stage.full { animation: pulse 0.3s linear infinite alternate; }
+  @keyframes pulse { from { background: #192a50; } to { background: #315a86; } }
+  #log { font-family: monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Incremental damage test</h1>
+  <p>Switch between static, small animated region and full-surface animation. Compare the [aster:cef] dirty_area_pct, copied, and [aster:slint] converted telemetry.</p>
+  <button id="static">Static</button>
+  <button id="small">Small animation</button>
+  <button id="full">Full background</button>
+  <button id="step">Change one pixel-sized element</button>
+  <div id="stage"><div id="square"></div></div>
+  <p id="log" aria-live="polite">Mode: static</p>
+  <input aria-label="Interaction smoke test" placeholder="Type to check focus and input">
+</main>
+<script>
+  const stage = document.querySelector('#stage');
+  const square = document.querySelector('#square');
+  const log = document.querySelector('#log');
+  let mode = 'static', previous = 0, frames = 0, lastReport = 0, step = 0;
+  for (const name of ['static','small','full']) {
+    document.getElementById(name).addEventListener('click', () => {
+      mode = name;
+      stage.classList.toggle('full', name === 'full');
+      square.style.transform = 'translateX(0px)';
+      log.textContent = `Mode: ${mode}`;
+    });
+  }
+  document.getElementById('step').addEventListener('click', () => {
+    mode = 'static';
+    stage.classList.remove('full');
+    square.style.transform = `translateX(${++step % 10}px)`;
+    log.textContent = `Single update: ${step}`;
+  });
+  const tick = (now) => {
+    frames++;
+    if (mode === 'small') square.style.transform = `translateX(${Math.round(100 + 95 * Math.sin(now / 450))}px)`;
+    if (now - lastReport > 2000) {
+      // Do not update DOM continuously in static mode: reporting itself paints.
+      console.log('Aster damage fixture rAF/s:', Math.round(frames * 1000 / (now - lastReport)));
+      frames = 0;
+      lastReport = now;
+    }
+    previous = now;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+</script>
+</body>
+</html>
