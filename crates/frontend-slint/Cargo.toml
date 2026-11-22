@@ -14,3 +14,6 @@ browser-contracts.workspace = true
 browser-render-wgpu = { path = "../browser-render-wgpu", optional = true }
 [build-dependencies]
 slint-build = "=1.19.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

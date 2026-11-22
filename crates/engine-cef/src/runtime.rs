@@ -2,9 +2,12 @@
 //! The caller must run `CefPumpHandle::pump_if_due` regularly and call `shutdown` after
 //! every `OnBeforeClose` acknowledgment is received.
 
+#[cfg(feature = "gpu")]
+use browser_contracts::GpuImportFilter;
 use browser_contracts::{
-    BrowserEngine, BrowserError, BrowserEvent, BrowserKey, DamageRect, EngineUpdates, FramePayload,
-    InputModifiers, KeyAction, KeyInput, PointerAction, PointerButton, TabId,
+    BrowserEngine, BrowserError, BrowserEvent, BrowserKey, CefAngleMode, DamageRect, EngineUpdates,
+    FramePayload, InputModifiers, KeyAction, KeyInput, LinuxDisplayMode, PointerAction,
+    PointerButton, PumpMode, PumpOptions, PumpWakeMode, TabId,
 };
 #[cfg(feature = "gpu")]
 use browser_render_wgpu::GpuHub;
@@ -17,6 +20,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -204,6 +208,8 @@ wrap_app! {
     struct AsterApp {
         requests: PumpRequests,
         gpu_osr_requested: bool,
+        linux_display: LinuxDisplayMode,
+        cef_angle: CefAngleMode,
     }
 
     impl App {
@@ -219,29 +225,48 @@ wrap_app! {
             if let Some(command_line) = command_line {
                 // Do not create an additional Chromium window outside of Slint.
                 command_line.append_switch(Some(&"no-startup-window".into()));
+                // CDP has no authentication. Restrict it to loopback when the
+                // test runner explicitly enables the debugging port.
+                if std::env::var_os("ASTER_CDP_PORT").is_some()
+                    && command_line.has_switch(Some(&"remote-debugging-address".into())) == 0
+                {
+                    command_line.append_switch_with_value(
+                        Some(&"remote-debugging-address".into()),
+                        Some(&CefString::from("127.0.0.1")),
+                    );
+                }
 
                 // CEF's Linux accelerated OSR relies on EGL/ANGLE and a real
                 // Ozone display backend to export DMA-BUF textures. Respect
                 // explicitly provided Chromium switches; keep the CPU mode
                 // untouched and make the experiment opt-out for A/B testing.
                 #[cfg(target_os = "linux")]
-                if self.gpu_osr_requested
-                    && std::env::var("ASTER_CEF_GPU_COMPAT").ok().as_deref() != Some("0")
                 {
-                    if command_line.has_switch(Some(&"use-angle".into())) == 0 {
-                        command_line.append_switch_with_value(
-                            Some(&"use-angle".into()),
-                            Some(&"gl-egl".into()),
-                        );
+                    let gpu_compat = self.gpu_osr_requested
+                        && std::env::var("ASTER_CEF_GPU_COMPAT").ok().as_deref() != Some("0");
+                    // Keep the existing EGL/ANGLE import path unchanged.
+                    if gpu_compat && command_line.has_switch(Some(&"use-angle".into())) == 0 {
+                        let angle = match self.cef_angle {
+                            CefAngleMode::Auto | CefAngleMode::GlEgl => Some("gl-egl"),
+                            CefAngleMode::Vulkan => Some("vulkan"),
+                            CefAngleMode::Default => None,
+                        };
+                        if let Some(angle) = angle {
+                            command_line.append_switch_with_value(
+                                Some(&"use-angle".into()), Some(&CefString::from(angle)),
+                            );
+                        }
                     }
-                    let requested = std::env::var("ASTER_CEF_OZONE").ok();
-                    let ozone = linux_ozone_platform(
-                        requested.as_deref(),
-                        std::env::var_os("DISPLAY").is_some(),
-                        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-                    );
-                    if command_line.has_switch(Some(&"ozone-platform".into())) == 0 {
-                        if let Some(ozone) = ozone {
+                    // An explicit Wayland selection also works in CPU OSR.
+                    // Chromium switches supplied by the caller take precedence.
+                    if (gpu_compat || self.linux_display != LinuxDisplayMode::Auto)
+                        && command_line.has_switch(Some(&"ozone-platform".into())) == 0
+                    {
+                        if let Some(ozone) = linux_ozone_platform(
+                            Some(self.linux_display.ozone_override()),
+                            std::env::var_os("DISPLAY").is_some(),
+                            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+                        ) {
                             command_line.append_switch_with_value(
                                 Some(&"ozone-platform".into()),
                                 Some(&CefString::from(ozone)),
@@ -270,6 +295,17 @@ pub struct CefRuntime {
 pub struct CefPumpHandle(Rc<PumpController>);
 
 impl CefPumpHandle {
+    /// The notifier can be invoked on any Chromium thread. It must only
+    /// schedule work for the Slint event loop, never run CEF itself.
+    pub fn set_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.0.set_waker(wake);
+    }
+    pub fn clear_waker(&self) {
+        self.0.clear_waker();
+    }
+    pub fn next_delay(&self) -> Duration {
+        self.0.next_delay(Instant::now())
+    }
     pub fn pump_if_due(&self) {
         if let Some(reason) = self.0.due(Instant::now()) {
             self.run(reason);
@@ -289,10 +325,33 @@ impl CefPumpHandle {
 
 impl CefRuntime {
     pub fn start(gpu_osr_requested: bool) -> Result<CefStartup, BrowserError> {
+        Self::start_with_options(
+            gpu_osr_requested,
+            LinuxDisplayMode::Auto,
+            CefAngleMode::Auto,
+            PumpOptions::default(),
+        )
+    }
+
+    pub fn start_with_options(
+        gpu_osr_requested: bool,
+        linux_display: LinuxDisplayMode,
+        cef_angle: CefAngleMode,
+        pump_options: PumpOptions,
+    ) -> Result<CefStartup, BrowserError> {
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         let args = args::Args::new();
-        let requests = PumpRequests::default();
-        let mut app = AsterApp::new(requests.clone(), gpu_osr_requested);
+        let requests = PumpRequests::new(if pump_options.mode == PumpMode::Event {
+            pump_options.wake
+        } else {
+            PumpWakeMode::Eager
+        });
+        let mut app = AsterApp::new(
+            requests.clone(),
+            gpu_osr_requested,
+            linux_display,
+            cef_angle,
+        );
         let subprocess_status = execute_process(
             Some(args.as_main_args()),
             Some(&mut app),
@@ -303,18 +362,18 @@ impl CefRuntime {
         }
         #[cfg(target_os = "linux")]
         if gpu_osr_requested {
-            let platform_override = std::env::var("ASTER_CEF_OZONE").ok();
             let platform = linux_ozone_platform(
-                platform_override.as_deref(),
+                Some(linux_display.ozone_override()),
                 std::env::var_os("DISPLAY").is_some(),
                 std::env::var_os("WAYLAND_DISPLAY").is_some(),
             );
             eprintln!(
-                "[aster:gpu] CEF Linux shared-texture mode: egl_ozone_compat={} ozone={:?} display={} wayland_display={}",
+                "[aster:gpu] CEF Linux shared-texture mode: egl_ozone_compat={} ozone={:?} display={} wayland_display={} angle={:?}",
                 std::env::var("ASTER_CEF_GPU_COMPAT").ok().as_deref() != Some("0"),
                 platform,
                 std::env::var_os("DISPLAY").is_some(),
                 std::env::var_os("WAYLAND_DISPLAY").is_some(),
+                cef_angle,
             );
             if platform.is_none() {
                 eprintln!(
@@ -322,13 +381,45 @@ impl CefRuntime {
                 );
             }
         }
-        let settings = Settings {
+        // Benchmark-only debugging is disabled unless the runner explicitly
+        // supplies a valid port. Never enable DevTools in a regular launch.
+        let remote_debugging_port = match std::env::var("ASTER_CDP_PORT") {
+            Ok(value) => {
+                let port = value.parse::<i32>().map_err(|_| {
+                    BrowserError::Engine(
+                        "ASTER_CDP_PORT must be a TCP port between 1024 and 65535".into(),
+                    )
+                })?;
+                if !(1024..=65535).contains(&port) {
+                    return Err(BrowserError::Engine("invalid ASTER_CDP_PORT".into()));
+                }
+                port
+            }
+            Err(std::env::VarError::NotPresent) => 0,
+            Err(error) => return Err(BrowserError::Engine(error.to_string())),
+        };
+        if remote_debugging_port != 0 {
+            eprintln!("[aster:benchmark] cdp=enabled port={remote_debugging_port}");
+        }
+        let mut settings = Settings {
             windowless_rendering_enabled: 1,
+            remote_debugging_port,
             external_message_pump: 1,
             // Do not weaken Chromium security just to make a prototype launch.
             no_sandbox: 0,
             ..Default::default()
         };
+        // Benchmarks need isolated profiles to avoid process singleton
+        // collisions and cross-run browser caches. The runner uses a unique
+        // absolute directory for each run and deletes it after shutdown.
+        if let Ok(root) = std::env::var("ASTER_CEF_CACHE_ROOT") {
+            if !std::path::Path::new(&root).is_absolute() {
+                return Err(BrowserError::Engine(
+                    "ASTER_CEF_CACHE_ROOT must be absolute".into(),
+                ));
+            }
+            settings.root_cache_path = CefString::from(root.as_str());
+        }
         if initialize(
             Some(args.as_main_args()),
             Some(&settings),
@@ -339,11 +430,12 @@ impl CefRuntime {
             return Err(BrowserError::Engine("CEF initialization failed".into()));
         }
         let perf = std::env::var("ASTER_PERF").ok().as_deref() == Some("1");
-        let pump = CefPumpHandle(Rc::new(PumpController::new(
-            requests,
-            pump_max_interval(),
-            perf,
-        )));
+        let pump_interval = if pump_options.mode == PumpMode::Event {
+            Duration::from_millis(pump_options.idle_ms)
+        } else {
+            pump_max_interval()
+        };
+        let pump = CefPumpHandle(Rc::new(PumpController::new(requests, pump_interval, perf)));
         Ok(CefStartup::Browser(Self {
             initialized: true,
             pump,
@@ -356,14 +448,32 @@ impl CefRuntime {
 
     /// CEF must not be shut down while any browser is still closing.
     pub fn shutdown(mut self, pending: &CloseTracker) -> Result<(), BrowserError> {
+        let lifecycle = std::env::var("ASTER_LIFECYCLE").ok().as_deref() == Some("1");
+        let started = Instant::now();
+        let mut pump_calls = 0_u64;
+        if lifecycle {
+            eprintln!(
+                "[aster:lifecycle] cef_shutdown_begin browsers_pending={}",
+                pending.remaining()
+            );
+        }
+        self.pump.clear_waker(); // Slint has exited; no more callbacks into its event loop.
         let deadline = Instant::now() + Duration::from_secs(15);
         while pending.remaining() > 0 && Instant::now() < deadline {
             self.pump.force_pump();
+            pump_calls += 1;
             thread::sleep(Duration::from_millis(8));
         }
         if pending.remaining() != 0 {
-            // Intentionally skip cef::shutdown on this error path, rather than
-            // shutdown native CEF while browser callbacks are still pending.
+            if lifecycle {
+                eprintln!(
+                    "[aster:lifecycle] cef_shutdown_timeout browsers_pending={} elapsed_ms={:.1} pumps={}",
+                    pending.remaining(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    pump_calls
+                );
+            }
+            // Never call cef::shutdown while browsers remain open.
             self.initialized = false;
             return Err(BrowserError::Engine(format!(
                 "{} Chromium browser(s) did not acknowledge close within 15s",
@@ -372,6 +482,13 @@ impl CefRuntime {
         }
         cef::shutdown();
         self.initialized = false;
+        if lifecycle {
+            eprintln!(
+                "[aster:lifecycle] cef_shutdown_complete browsers_pending=0 elapsed_ms={:.1} pumps={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                pump_calls
+            );
+        }
         Ok(())
     }
 }
@@ -504,15 +621,29 @@ wrap_render_handler! {
                 }
                 return;
             };
+            let width = info.extra.coded_size.width.max(0) as u32;
+            let height = info.extra.coded_size.height.max(0) as u32;
+            // CEF documents dirtyRects as the set needing repaint. Skip only
+            // an *explicit* empty set, and only after a prior valid GPU frame.
+            // None and invalid input retain the conservative full import path.
+            if skip_empty_damage_import(
+                hub.import_filter(), hub.revision(self.tab).is_some(), dirty_rects,
+            )
+            {
+                hub.note_empty_damage_skip(u64::from(width) * u64::from(height));
+                return;
+            }
             let started = Instant::now();
             let importer = SharedTextureHandle::new(info);
-            // SAFETY: the handle is used only inside the originating CEF
-            // callback; cef-rs duplicates/copies the native resource and waits
-            // for the GPU copy before returning an owned texture.
+            // SAFETY: the borrowed handle is used only inside the originating
+            // callback; cef-rs copies it into an owned WGPU texture and waits
+            // for completion before CEF reuses the native surface.
             let imported = unsafe { importer.import_texture(&ctx.device, &ctx.queue) };
+            let import_duration = started.elapsed();
             match imported {
                 Ok(texture) => {
                     let size = texture.size();
+                    hub.note_import(u64::from(size.width) * u64::from(size.height), import_duration);
                     let damage = paint_damage(dirty_rects, size.width, size.height);
                     if let Err(error) = hub.present(self.tab, &texture, &damage) {
                         hub.fail(format!("GPU presentation failed: {error}"));
@@ -632,8 +763,24 @@ struct CefTab {
 }
 
 #[cfg(feature = "gpu")]
-fn first_gpu_frame_timed_out(opened_at: Instant, first_frame_seen: bool, now: Instant) -> bool {
-    !first_frame_seen && now.saturating_duration_since(opened_at) > Duration::from_secs(8)
+fn first_gpu_frame_timed_out(
+    opened_at: Instant,
+    first_frame_seen: bool,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    !first_frame_seen && now.saturating_duration_since(opened_at) > timeout
+}
+
+#[cfg(feature = "gpu")]
+fn skip_empty_damage_import(
+    filter: GpuImportFilter,
+    previously_presented: bool,
+    dirty_rects: Option<&[Rect]>,
+) -> bool {
+    filter == GpuImportFilter::EmptyDamage
+        && previously_presented
+        && matches!(dirty_rects, Some(rects) if rects.is_empty())
 }
 
 #[cfg(feature = "gpu")]
@@ -654,6 +801,8 @@ pub struct CefEngine {
     #[cfg(feature = "gpu")]
     gpu_requested: bool,
     #[cfg(feature = "gpu")]
+    gpu_first_frame_timeout: Duration,
+    #[cfg(feature = "gpu")]
     deferred: HashMap<TabId, DeferredTab>,
 }
 
@@ -670,6 +819,8 @@ impl Default for CefEngine {
             #[cfg(feature = "gpu")]
             gpu_requested: false,
             #[cfg(feature = "gpu")]
+            gpu_first_frame_timeout: Duration::from_secs(8),
+            #[cfg(feature = "gpu")]
             deferred: HashMap::new(),
         }
     }
@@ -678,6 +829,11 @@ impl Default for CefEngine {
 impl CefEngine {
     pub fn close_tracker(&self) -> CloseTracker {
         self.pending.clone()
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_first_frame_timeout(&mut self, timeout: Duration) {
+        self.gpu_first_frame_timeout = timeout;
     }
 
     #[cfg(feature = "gpu")]
@@ -823,11 +979,16 @@ impl CefEngine {
                                 tab.opened_at,
                                 mailbox.gpu_first_frames.contains(&id),
                                 Instant::now(),
+                                self.gpu_first_frame_timeout,
                             )
                     })
             };
             if first_frame_timed_out {
-                self.fall_back_to_cpu("no first successful accelerated paint within 8 seconds");
+                eprintln!(
+                    "[aster:gpu] capture_failed_or_unavailable: no accelerated frame after {}ms; Chromium frame-pool OOM? is not proof of VRAM exhaustion",
+                    self.gpu_first_frame_timeout.as_millis()
+                );
+                self.fall_back_to_cpu("no first successful accelerated paint before timeout");
             }
         }
         // Do not recreate a tab until all old OnBeforeClose callbacks finished.
@@ -1246,7 +1407,8 @@ mod gpu_first_frame_watchdog_tests {
         assert!(!first_gpu_frame_timed_out(
             now - Duration::from_secs(20),
             true,
-            now
+            now,
+            Duration::from_secs(8)
         ));
     }
 
@@ -1256,12 +1418,14 @@ mod gpu_first_frame_watchdog_tests {
         assert!(!first_gpu_frame_timed_out(
             now - Duration::from_secs(7),
             false,
-            now
+            now,
+            Duration::from_secs(8)
         ));
         assert!(first_gpu_frame_timed_out(
             now - Duration::from_secs(9),
             false,
-            now
+            now,
+            Duration::from_secs(8)
         ));
     }
 
@@ -1271,7 +1435,47 @@ mod gpu_first_frame_watchdog_tests {
         assert!(!first_gpu_frame_timed_out(
             now - Duration::from_secs(300),
             true,
-            now
+            now,
+            Duration::from_secs(8)
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod import_filter_tests {
+    use super::*;
+    #[test]
+    fn empty_damage_filter_never_discards_first_or_unknown_frame() {
+        assert!(!skip_empty_damage_import(
+            GpuImportFilter::EmptyDamage,
+            false,
+            Some(&[])
+        ));
+        assert!(!skip_empty_damage_import(
+            GpuImportFilter::EmptyDamage,
+            true,
+            None
+        ));
+        assert!(!skip_empty_damage_import(
+            GpuImportFilter::Off,
+            true,
+            Some(&[])
+        ));
+        assert!(skip_empty_damage_import(
+            GpuImportFilter::EmptyDamage,
+            true,
+            Some(&[])
+        ));
+        let damage = [Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }];
+        assert!(!skip_empty_damage_import(
+            GpuImportFilter::EmptyDamage,
+            true,
+            Some(&damage)
         ));
     }
 }

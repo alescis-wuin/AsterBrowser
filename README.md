@@ -110,3 +110,59 @@ to CPU OSR after failures. It is not fully zero-copy and remains experimental.
 
 See [docs/P0-GPU-BUFFERING.md](docs/P0-GPU-BUFFERING.md) for configuration,
 limitations, the GPU memory-copy distinction, test commands and acceptance gates.
+
+## Optional Fontconfig + GPU optimization experiments (Phases 1 and 2)
+
+The existing CPU renderer remains the default. Linux Fontconfig setup is
+opt-in (`--fontconfig auto|force|off` or `ASTER_FONTCONFIG_MODE`), with an
+optional `--fontconfig-probe on` diagnostic. GPU rendering (`--renderer gpu`
+with `--features cef-gpu`) supports one, two or three presentation buffers,
+`--gpu-damage adaptive|legacy|full|partial`, optional lazy initializations,
+queue-vs-wait synchronization and explicit-empty-damage import filtering.
+All optimizations can be benchmarked independently via `ASTER_PERF=1` and
+`scripts/compare-rendering.py`; closure tracing uses `ASTER_LIFECYCLE=1`.
+See [Phase 1 Fontconfig](docs/P1-FONTCONFIG.md) and
+[Phase 2 GPU](docs/P2-GPU-OPTIMIZATIONS.md). Native Wayland rendering and
+copy-free DMA-BUF import are **not** claimed as implemented here.
+
+### P3/P4 experiments — Wayland and event-driven CEF/Slint
+
+The opt-in `--linux-display auto|x11|wayland|none` controls Chromium's Linux
+Ozone platform. `env -u DISPLAY ... --linux-display wayland` lets you test
+Wayland **without XWayland**; the CPU path is supported as a reference and the
+CEF accelerated DMA-BUF path requires hardware validation. See
+[docs/P3-WAYLAND.md](docs/P3-WAYLAND.md).
+
+The opt-in `--pump-mode legacy|event` and `--pump-idle-ms 16..1000` controls
+CEF scheduling. `event` uses coalesced cross-thread Slint notifications and a
+single-shot deadline timer instead of the 8ms repeated polling baseline. See
+[docs/P4-EVENT-LOOP.md](docs/P4-EVENT-LOOP.md). Compare logs using
+`python scripts/compare-loop.py LABEL=FILE LABEL=FILE`.
+
+### P3/P4: Wayland diagnostics and deadline-aware CEF loop (optional hardening)
+
+See [docs/P3-P4-HARDENING.md](docs/P3-P4-HARDENING.md) for install, native-Wayland CPU/GPU probes, benchmark scenarios, and validation commands. The new switches `--cef-angle`, `--wayland-gpu`, `--gpu-first-frame-timeout-ms`, `--pump-wake`, `--pump-idle-ms` and `--gpu-presentation` are independent. `--pump-mode legacy` and `--gpu-presentation poll` remain the reference modes. **Native Wayland accelerated OSR is not asserted to work on CEF 156 / NVIDIA**; use the CPU-first mode or X11/XWayland GPU while investigating Chromium's capture-buffer issues.
+
+
+### P3/P4 hardening (deadline scheduling, Wayland diagnostics)
+
+See [docs/P3-P4-HARDENING.md](docs/P3-P4-HARDENING.md) for the independent
+`--pump-wake eager|deadline`, `--gpu-presentation poll|notify`,
+`--cef-angle`, `--wayland-gpu`, and first-frame timeout controls, plus the
+CEF/Slint latency and process-CPU telemetry. Native CEF accelerated Wayland
+rendering still requires hardware/upstream validation.
+
+## P5 — Benchmarks automatisés
+
+Le banc `benchmarks/aster_bench/` est indépendant de CEF et Slint. Il pilote un Aster
+compilé avec la feature optionnelle `benchmark-control`, via un transport local
+avec jeton et/ou CDP, et peut lancer Weston headless GL/XWayland. Il mesure aussi
+les processus Chromium enfants et produit JSON, CSV, HTML et journaux par essai.
+
+```sh
+uv sync --project benchmarks
+uv run --project benchmarks python -m aster_bench plan --suite gpu --scenarios idle,animation --repetitions 2
+uv run --project benchmarks python -m aster_bench run --suite gpu --displays host-x11 --scenarios idle,animation --repetitions 2 --warmup 5 --duration 15
+```
+
+Voir [docs/P5-BENCHMARKS.md](docs/P5-BENCHMARKS.md) pour les modes et limites.
