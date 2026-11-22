@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aster P5 — fixture reproductible</title>
+<style>
+  :root { color-scheme: light; font: 16px system-ui; }
+  body { margin: 0; background: #101820; color: #fff; }
+  header { padding: 16px; height: 80px; background: #182b3b; }
+  canvas { display: block; background: #172433; }
+  input { margin: 12px; padding: 10px; font-size: 16px; }
+  .line { height: 32px; border-bottom: 1px solid #304457; padding-left: 18px; }
+  #status { position: fixed; right: 20px; top: 15px; font: 12px monospace; }
+</style>
+<header><strong>Aster Browser P5 — fixture locale</strong>
+<span id="status"></span>
+<input id="typing" placeholder="Saisie automatisée" autocomplete="off"></header>
+<canvas id="canvas" width="800" height="450"></canvas>
+<div id="rows"></div>
+<script>
+(() => {
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const mode = params.get('mode') || 'idle';
+  const seed = Number(params.get('seed') || 42) >>> 0;
+  const canvas = document.querySelector('#canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const metrics = { frames: 0, inputs: 0, scrolls: 0, pointers: 0, started: performance.now() };
+  const rows = document.querySelector('#rows');
+  let state = (seed || 1) >>> 0;
+  const random = () => { state = (1664525 * state + 1013904223) >>> 0; return state / 0x100000000; };
+  const fragment = document.createDocumentFragment();
+  for (let i = 0; i < 160; i++) {
+    const div = document.createElement('div');
+    div.className = 'line'; div.textContent = `Document de test ${i} — ${Math.floor(random() * 1000000)}`;
+    fragment.appendChild(div);
+  }
+  rows.appendChild(fragment);
+  document.querySelector('#typing').addEventListener('input', () => metrics.inputs++);
+  addEventListener('scroll', () => metrics.scrolls++, { passive: true });
+  document.addEventListener('pointerdown', () => metrics.pointers++);
+  function draw(t) {
+    const x = Math.round(400 + 180 * Math.sin(t / 420));
+    const y = Math.round(210 + 120 * Math.cos(t / 540));
+    ctx.fillStyle = '#172433'; ctx.fillRect(0, 0, 800, 450);
+    ctx.fillStyle = '#55bbce'; ctx.fillRect(x - 42, y - 42, 84, 84);
+    ctx.fillStyle = '#ffffff'; ctx.fillText(`seed=${seed} frame=${metrics.frames}`, 16, 25);
+    metrics.frames++;
+    if (mode === 'animation') requestAnimationFrame(draw);
+  }
+  // Only the animated scenario requests a continuous stream of frames.
+  draw(0);
+  const status = document.querySelector('#status');
+  status.textContent = `mode=${mode}, seed=${seed}`;
+  window.__asterBench = {
+    ready: true,
+    reset() { metrics.frames = metrics.inputs = metrics.scrolls = metrics.pointers = 0; metrics.started = performance.now(); },
+    metrics() { return { ...metrics, duration_ms: performance.now() - metrics.started,
+      scroll_y: window.scrollY, typed_chars: document.querySelector('#typing').value.length }; },
+  };
+})();
+</script></html>

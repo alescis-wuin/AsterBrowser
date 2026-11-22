@@ -278,4 +278,8 @@ pub fn normalize_address(input: &str) -> String {
 }
 
 pub mod render_options;
-pub use render_options::{BufferCount, RenderMode, RenderOptions};
+pub use render_options::{
+    BufferCount, CefAngleMode, GpuDamageMode, GpuImportFilter, GpuOptions, GpuPresentationMode,
+    GpuSyncMode, LinuxDisplayMode, PumpMode, PumpOptions, PumpWakeMode, RenderMode, RenderOptions,
+    WaylandGpuMode,
+};

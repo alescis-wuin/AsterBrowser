@@ -1,0 +1,16 @@
+[project]
+name = "aster-bench"
+version = "0.1.0"
+description = "Aster Browser reproducible offscreen benchmark runner"
+requires-python = ">=3.11"
+dependencies = [
+    "psutil>=6.0,<9",
+    "websocket-client>=1.8,<2",
+]
+
+[project.scripts]
+aster-bench = "aster_bench.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"

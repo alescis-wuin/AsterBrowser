@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<title>AsterBrowser - P4 deterministic scheduler scenario</title>
+<style>
+  body { font: 16px sans-serif; margin: 24px; }
+  .track { width: min(640px, 90vw); height: 100px; position: relative; border: 1px solid #777; overflow: hidden; }
+  #square { position: absolute; width: 48px; height: 48px; top: 26px; background: #3583ba; }
+  body.animate #square { animation: travel 2s linear infinite alternate; }
+  @keyframes travel { from { left: 0; } to { left: calc(100% - 48px); } }
+  button, input { padding: 8px; margin: 8px 0; }
+</style>
+<h1>Aster - P4 scenario</h1>
+<p id="mode"></p>
+<div class="track"><div id="square"></div></div>
+<p>Use the same window size and remain on this page for equal durations. Query: <code>?mode=idle</code> or <code>?mode=animate</code>.</p>
+<button id="interact">Input action</button>
+<input id="text" placeholder="Type during input scenario">
+<output id="count">actions=0</output>
+<script>
+  const mode = new URLSearchParams(location.search).get('mode') === 'animate' ? 'animate' : 'idle';
+  if (mode === 'animate') document.body.classList.add('animate');
+  document.getElementById('mode').textContent = `Mode: ${mode}`;
+  let count = 0;
+  document.getElementById('interact').onclick = () => document.getElementById('count').textContent = `actions=${++count}`;
+  document.getElementById('text').oninput = () => document.getElementById('count').textContent = `actions=${++count}`;
+</script>
