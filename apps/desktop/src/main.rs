@@ -37,10 +37,11 @@ fn workspace_bridge<E: BrowserEngine + 'static>(
     browser: &Rc<RefCell<Browser<E>>>,
     workspaces: &Rc<RefCell<WorkspaceSession>>,
 ) -> frontend_slint::WorkspacesIntegration {
-    let initial = workspaces.borrow().projection();
+    let initial = workspaces.borrow().projection(&browser.borrow().snapshot());
     let dispatch_browser = Rc::clone(browser);
     let dispatch_store = Rc::clone(workspaces);
     let projection_store = Rc::clone(workspaces);
+    let projection_browser = Rc::clone(browser);
     let revision_store = Rc::clone(workspaces);
     frontend_slint::WorkspacesIntegration {
         initial,
@@ -48,9 +49,14 @@ fn workspace_bridge<E: BrowserEngine + 'static>(
             let mut browser = dispatch_browser.borrow_mut();
             let mut workspaces = dispatch_store.borrow_mut();
             workspaces.dispatch_workspace(&mut browser, command);
-            (browser.snapshot(), workspaces.projection())
+            let browser_snapshot = browser.snapshot();
+            let workspace_snapshot = workspaces.projection(&browser_snapshot);
+            (browser_snapshot, workspace_snapshot)
         }),
-        snapshot: Rc::new(move || projection_store.borrow().projection()),
+        snapshot: Rc::new(move || {
+            let browser = projection_browser.borrow().snapshot();
+            projection_store.borrow().projection(&browser)
+        }),
         revision: Rc::new(move || revision_store.borrow().revision()),
     }
 }

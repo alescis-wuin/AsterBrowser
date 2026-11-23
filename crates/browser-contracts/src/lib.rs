@@ -55,6 +55,20 @@ pub struct MoveTargetView {
     pub label: String,
     pub depth: usize,
 }
+/// Search result type: 0=live tab, 1=saved web resource, 2=workspace.
+/// IDs of active Chromium tabs are never part of a persisted workspace record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResultView {
+    pub kind: i32,
+    pub workspace_id: u64,
+    pub tab_id: Option<TabId>,
+    pub resource_id: Option<u64>,
+    pub title: String,
+    pub subtitle: String,
+    pub color: String,
+    pub icon: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub active_workspace_id: u64,
@@ -63,6 +77,7 @@ pub struct WorkspaceSnapshot {
     pub items: Vec<SavedItemView>,
     pub favorites: Vec<SavedItemView>,
     pub destinations: Vec<MoveTargetView>,
+    pub search_results: Vec<SearchResultView>,
     pub message: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +92,10 @@ pub enum WorkspaceCommand {
     DeleteFolder(u64),
     MoveFolder { id: u64, parent_id: Option<u64> },
     SaveTab(TabId),
+    MoveTab { tab: TabId, workspace_id: u64, folder_id: Option<u64> },
+    ToggleTabPin(TabId),
+    ToggleTabFavorite(TabId),
+    Search { query: String, scope: i32 }, // scope: 0=all, 1=tabs, 2=saved, 3=favorites
     AddLink { url: String, title: String },
     OpenResource(u64),
     RemoveEntry(u64),

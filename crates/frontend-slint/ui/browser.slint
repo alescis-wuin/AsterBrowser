@@ -33,6 +33,16 @@ export struct SavedView {
     favorite: bool,
     live: bool,
 }
+export struct SearchView {
+    kind: int, // 0=tab, 1=saved resource, 2=workspace
+    workspace-id: int,
+    tab-id: int,
+    resource-id: int,
+    title: string,
+    subtitle: string,
+    glyph: string,
+    color: color,
+}
 export struct DestinationView {
     workspace-id: int,
     folder-id: int,
@@ -40,9 +50,43 @@ export struct DestinationView {
     depth: int,
 }
 
+component SearchRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> glyph;
+    in property <color> accent;
+    callback selected();
+
+    height: 47px;
+    border-radius: 8px;
+    background: result-hit.has-hover || result-focus.has-focus ? #34384e : #252a3a;
+    accessible-role: list-item;
+    accessible-label: root.title + " — " + root.subtitle;
+    result-focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) { root.selected(); accept }
+            else { reject }
+        }
+    }
+    result-hit := TouchArea { clicked => { root.selected(); } }
+    HorizontalLayout {
+        padding-left: 7px;
+        spacing: 6px;
+        Text { text: root.glyph; color: root.accent; vertical-alignment: center; font-size: 16px; }
+        VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+            Text { text: root.title; color: #ececf6; font-size: 12px; overflow: elide; }
+            Text { text: root.subtitle; color: #8d98b3; font-size: 10px; overflow: elide; }
+        }
+    }
+}
+
 component IconButton inherits Rectangle {
     in property <string> label;
     in property <string> description: label;
+    in property <color> label-color: #9ba3b8;
     in property <length> button-size: 34px;
     callback clicked();
 
@@ -55,7 +99,7 @@ component IconButton inherits Rectangle {
 
     Text {
         text: root.label;
-        color: hit.has-hover || keyboard.has-focus ? #ececf6 : #9ba3b8;
+        color: hit.has-hover || keyboard.has-focus ? #ececf6 : root.label-color;
         font-size: 17px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -109,10 +153,13 @@ component SavedRow inherits Rectangle {
     in property <int> depth;
     in property <bool> folder;
     in property <bool> pinned;
+    in property <bool> can-pin: true;
     in property <bool> favorite;
     in property <bool> live;
     callback opened();
     callback editing();
+    callback pin-clicked();
+    callback favorite-clicked();
 
     height: 40px;
     border-radius: 8px;
@@ -126,7 +173,18 @@ component SavedRow inherits Rectangle {
         spacing: 5px;
         Text { text: root.glyph; color: root.accent; font-size: 15px; vertical-alignment: center; }
         Text { text: root.title; color: #d3d5e4; font-size: 12px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-        Text { text: root.pinned ? "◆" : (root.favorite ? "★" : (root.live ? "●" : "")); color: #b8a9ee; font-size: 11px; vertical-alignment: center; }
+        if (!root.folder): IconButton {
+            button-size: 24px;
+            label: root.favorite ? "★" : "☆";
+            description: root.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
+            clicked => { root.favorite-clicked(); }
+        }
+        if (!root.folder && root.can-pin): IconButton {
+            button-size: 24px;
+            label: root.pinned ? "◆" : "◇";
+            description: root.pinned ? "Désépingler" : "Épingler";
+            clicked => { root.pin-clicked(); }
+        }
         IconButton { button-size: 25px; label: "⋯"; description: "Organiser ou personnaliser"; clicked => { root.editing(); } }
     }
 }
@@ -136,6 +194,7 @@ component SidebarTab inherits Rectangle {
     in property <bool> active;
     callback activated();
     callback closed();
+    callback organizing();
 
     height: 45px;
     border-radius: 10px;
@@ -183,6 +242,12 @@ component SidebarTab inherits Rectangle {
             horizontal-stretch: 1;
         }
         IconButton {
+            label: "⋯";
+            description: "Organiser l'onglet " + root.title;
+            button-size: 26px;
+            clicked => { root.organizing(); }
+        }
+        IconButton {
             label: "×";
             description: "Fermer l'onglet " + root.title;
             button-size: 26px;
@@ -203,13 +268,17 @@ export component BrowserWindow inherits Window {
     in property <[SavedView]> saved-items;
     in property <[SavedView]> favorites;
     in property <[DestinationView]> destinations;
+    in property <[SearchView]> search-results;
     in property <int> active-workspace-id: 1;
     in property <string> workspace-message;
     private property <bool> favorites-only: false;
+    private property <string> search-query: "";
+    private property <int> search-scope: 0; // 0=all, 1=tabs, 2=resources, 3=favorites
     // In-panel editor state, entirely transient; validation happens in Rust.
     private property <int> editor-mode: 0; // 1=space, 2=folder, 3=resource, 4=URL, 5=move
     private property <int> editor-id: 0;
     private property <int> editor-resource-id: 0;
+    private property <int> editor-tab-id: 0;
     private property <int> editor-parent-id: 0;
     private property <string> editor-title: "";
     private property <string> editor-url: "";
@@ -255,6 +324,10 @@ export component BrowserWindow inherits Window {
     callback delete-folder(int);
     callback move-folder(int, int);
     callback save-tab(int);
+    callback move-tab(int, int, int);
+    callback toggle-tab-pin(int);
+    callback toggle-tab-favorite(int);
+    callback search-workspaces(string, int);
     callback add-link(string, string);
     callback open-resource(int);
     callback remove-entry(int);
@@ -322,6 +395,15 @@ export component BrowserWindow inherits Window {
             keys: @keys(Control + W);
             activated => {
                 if (root.active-tab-id >= 0) { root.close-tab(root.active-tab-id); }
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Shift + F);
+            activated => {
+                root.sidebar-open = true;
+                root.sidebar-locked = true;
+                close-delay.stop();
+                search-field.focus();
             }
         }
         KeyBinding {
@@ -567,6 +649,7 @@ export component BrowserWindow inherits Window {
                                     root.sidebar-locked = true;
                                     close-delay.stop();
                                     root.editor-mode = 1;
+                                    root.editor-tab-id = 0;
                                     root.editor-id = space.id;
                                     root.editor-title = space.title;
                                     root.editor-color = space.color-hex;
@@ -588,12 +671,68 @@ export component BrowserWindow inherits Window {
                             spacing: 5px;
                             IconButton {
                                 button-size: 28px; label: "+"; description: "Créer un espace";
-                                clicked => { root.editor-mode = 1; root.editor-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "grid"; root.sidebar-locked = true; close-delay.stop(); }
+                                clicked => { root.editor-mode = 1; root.editor-tab-id = 0; root.editor-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "grid"; root.sidebar-locked = true; close-delay.stop(); }
                             }
                             Text { text: "Créer un espace"; color: #9499ad; font-size: 11px; vertical-alignment: center; }
                         }
                     }
-                    Rectangle { height: 12px; background: #00000000; }
+                    Rectangle {
+                        height: 38px;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            search-field := LineEdit {
+                                text <=> root.search-query;
+                                placeholder-text: "Rechercher partout...";
+                                font-size: 12px;
+                                horizontal-stretch: 1;
+                                changed text => { root.search-workspaces(text, root.search-scope); }
+                            }
+                            IconButton {
+                                button-size: 27px;
+                                label: root.search-scope == 0 ? "T" : (root.search-scope == 1 ? "O" : (root.search-scope == 2 ? "R" : "★"));
+                                description: root.search-scope == 0 ? "Tout rechercher" :
+                                    (root.search-scope == 1 ? "Onglets uniquement" :
+                                    (root.search-scope == 2 ? "Ressources uniquement" : "Favoris uniquement"));
+                                clicked => {
+                                    root.search-scope = (root.search-scope + 1) % 4;
+                                    root.search-workspaces(root.search-query, root.search-scope);
+                                }
+                            }
+                            IconButton {
+                                button-size: 27px; label: "×"; description: "Effacer la recherche";
+                                clicked => { root.search-query = ""; }
+                            }
+                        }
+                    }
+                    if (root.search-query != ""): ScrollView {
+                        height: min(235px, root.height / 3);
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            width: 267px;
+                            spacing: 4px;
+                            for hit in root.search-results: SearchRow {
+                                title: hit.title;
+                                subtitle: hit.subtitle;
+                                glyph: hit.glyph;
+                                accent: hit.color;
+                                selected => {
+                                    if (hit.kind == 0) { root.select-tab(hit.tab-id); }
+                                    else if (hit.kind == 1) {
+                                        root.switch-workspace(hit.workspace-id);
+                                        root.open-resource(hit.resource-id);
+                                    } else { root.switch-workspace(hit.workspace-id); }
+                                    root.favorites-only = false;
+                                    root.search-query = "";
+                                }
+                            }
+                            if (root.search-results.length == 0): Text {
+                                text: "Aucun résultat local";
+                                color: #8e93a9;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
                     Rectangle { height: 1px; background: #373845; }
                     Rectangle {
                         height: 36px;
@@ -629,6 +768,13 @@ export component BrowserWindow inherits Window {
                                     if (!root.sidebar-locked) { root.sidebar-open = false; }
                                 }
                                 closed => { root.close-tab(tab.id); }
+                                organizing => {
+                                    root.editor-mode = 6;
+                                    root.editor-tab-id = tab.id;
+                                    root.editor-title = tab.title;
+                                    root.sidebar-locked = true;
+                                    close-delay.stop();
+                                }
                             }
                             if (root.tabs.length == 0): Text {
                                 text: "Aucun onglet ouvert";
@@ -655,13 +801,13 @@ export component BrowserWindow inherits Window {
                                 button-size: 28px;
                                 label: "+";
                                 description: "Ajouter une URL enregistrée";
-                                clicked => { root.editor-mode = 4; root.editor-title = ""; root.editor-url = "https://"; root.sidebar-locked = true; close-delay.stop(); }
+                                clicked => { root.editor-mode = 4; root.editor-tab-id = 0; root.editor-title = ""; root.editor-url = "https://"; root.sidebar-locked = true; close-delay.stop(); }
                             }
                             IconButton {
                                 button-size: 28px;
                                 label: "▱";
                                 description: "Créer un dossier virtuel";
-                                clicked => { root.favorites-only = false; root.editor-mode = 2; root.editor-id = 0; root.editor-parent-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "folder"; root.sidebar-locked = true; close-delay.stop(); }
+                                clicked => { root.favorites-only = false; root.editor-mode = 2; root.editor-tab-id = 0; root.editor-id = 0; root.editor-parent-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "folder"; root.sidebar-locked = true; close-delay.stop(); }
                             }
                         }
                     }
@@ -678,10 +824,14 @@ export component BrowserWindow inherits Window {
                                 accent: item.color;
                                 folder: item.folder;
                                 pinned: item.pinned;
+                                can-pin: item.id > 0;
                                 favorite: item.favorite;
                                 live: item.live;
                                 opened => { root.open-resource(item.resource-id); }
+                                pin-clicked => { if (item.id > 0) { root.toggle-entry-pin(item.id); } }
+                                favorite-clicked => { root.toggle-resource-favorite(item.resource-id); }
                                 editing => {
+                                    root.editor-tab-id = 0;
                                     root.sidebar-locked = true; close-delay.stop();
                                     root.editor-mode = item.folder ? 2 : 3;
                                     root.editor-id = item.id;
@@ -751,18 +901,19 @@ export component BrowserWindow inherits Window {
                     HorizontalLayout {
                         spacing: 7px;
                         Text {
-                            text: root.editor-mode == 1 ? "Espace" : (root.editor-mode == 2 ? "Dossier" : (root.editor-mode == 3 ? "Ressource" : (root.editor-mode == 4 ? "Enregistrer une URL" : "Ranger")));
+                            text: root.editor-mode == 1 ? "Espace" : (root.editor-mode == 2 ? "Dossier" : (root.editor-mode == 3 ? "Ressource" : (root.editor-mode == 4 ? "Enregistrer une URL" : (root.editor-mode == 6 ? "Organiser l'onglet" : "Ranger"))));
                             font-size: 17px;
                             color: #ececf6;
                             horizontal-stretch: 1;
                             vertical-alignment: center;
                         }
-                        IconButton { label: "×"; description: "Fermer l'éditeur"; clicked => { root.editor-mode = 0; root.confirm-delete = false; } }
+                        IconButton { label: "×"; description: "Fermer l'éditeur"; clicked => { root.editor-mode = 0; root.editor-tab-id = 0; root.confirm-delete = false; } }
                     }
                     Rectangle { height: 1px; background: #383744; }
                     editor-fields := ScrollView {
-                        visible: root.editor-mode != 5;
-                        vertical-stretch: 1;
+                        visible: root.editor-mode != 5 && root.editor-mode != 6;
+                        height: root.editor-mode == 5 || root.editor-mode == 6 ? 0px : max(110px, organizer.height - 165px);
+                        vertical-stretch: root.editor-mode == 5 || root.editor-mode == 6 ? 0 : 1;
                         horizontal-scrollbar-policy: always-off;
                         VerticalLayout {
                             spacing: 8px;
@@ -778,14 +929,24 @@ export component BrowserWindow inherits Window {
                             color-field := LineEdit { visible: root.editor-mode != 4; text: root.editor-color; placeholder-text: "#9ddac8"; }
                             if (root.editor-mode != 4): HorizontalLayout {
                                 spacing: 5px;
-                                IconButton { label: "●"; description: "Vert doux"; clicked => { root.editor-color = "#9ddac8"; } }
-                                IconButton { label: "●"; description: "Lilas"; clicked => { root.editor-color = "#bdacfc"; } }
-                                IconButton { label: "●"; description: "Bleu"; clicked => { root.editor-color = "#a7c9ee"; } }
-                                IconButton { label: "●"; description: "Sable"; clicked => { root.editor-color = "#e5c9a2"; } }
-                                IconButton { label: "●"; description: "Rose"; clicked => { root.editor-color = "#e7aaa9"; } }
+                                IconButton { label: "●"; label-color: #9ddac8; description: "Vert doux"; clicked => { root.editor-color = "#9ddac8"; } }
+                                IconButton { label: "●"; label-color: #bdacfc; description: "Lilas"; clicked => { root.editor-color = "#bdacfc"; } }
+                                IconButton { label: "●"; label-color: #a7c9ee; description: "Bleu"; clicked => { root.editor-color = "#a7c9ee"; } }
+                                IconButton { label: "●"; label-color: #e5c9a2; description: "Sable"; clicked => { root.editor-color = "#e5c9a2"; } }
+                                IconButton { label: "●"; label-color: #e7aaa9; description: "Rose"; clicked => { root.editor-color = "#e7aaa9"; } }
                             }
                             if (root.editor-mode != 4): Text { text: "Icône"; font-size: 12px; color: #a7aac0; }
                             icon-field := LineEdit { visible: root.editor-mode != 4; text: root.editor-icon; placeholder-text: "grid"; }
+                            if (root.editor-mode != 4): HorizontalLayout {
+                                spacing: 3px;
+                                IconButton { button-size: 29px; label: "▦"; description: "Grille"; clicked => { root.editor-icon = "grid"; } }
+                                IconButton { button-size: 29px; label: "◉"; description: "Web"; clicked => { root.editor-icon = "globe"; } }
+                                IconButton { button-size: 29px; label: "▱"; description: "Dossier"; clicked => { root.editor-icon = "folder"; } }
+                                IconButton { button-size: 29px; label: "⌘"; description: "Code"; clicked => { root.editor-icon = "code"; } }
+                                IconButton { button-size: 29px; label: "▧"; description: "Film"; clicked => { root.editor-icon = "film"; } }
+                                IconButton { button-size: 29px; label: "★"; description: "Étoile"; clicked => { root.editor-icon = "star"; } }
+                                IconButton { button-size: 29px; label: "☁"; description: "Nuage"; clicked => { root.editor-icon = "cloud"; } }
+                            }
                             if (root.editor-mode != 4): Text {
                                 text: "grid, code, film, book, star, folder, globe, file, cloud, terminal, pin, link";
                                 color: #8b90a7;
@@ -795,13 +956,39 @@ export component BrowserWindow inherits Window {
                             Rectangle { height: 8px; }
                         }
                     }
+                    if (root.editor-mode == 6): VerticalLayout {
+                        spacing: 10px;
+                        Text { text: root.editor-title; font-size: 14px; color: #daddec; wrap: word-wrap; }
+                        Text { text: "Un déplacement conserve l'onglet Chromium actif et enregistre sa référence à destination.";
+                            font-size: 11px; color: #9ca3b8; wrap: word-wrap; }
+                        IconButton {
+                            label: "☆"; description: "Enregistrer cet onglet dans l'espace";
+                            clicked => { root.save-tab(root.editor-tab-id); root.editor-tab-id = 0; root.editor-mode = 0; }
+                        }
+                        Text { text: "Enregistrer l'URL"; font-size: 12px; color: #d3d5e4; }
+                        IconButton {
+                            label: "◆"; description: "Épingler ou désépingler cet onglet enregistré";
+                            clicked => { root.toggle-tab-pin(root.editor-tab-id); root.editor-tab-id = 0; root.editor-mode = 0; }
+                        }
+                        Text { text: "Épingler / désépingler"; font-size: 12px; color: #d3d5e4; }
+                        IconButton {
+                            label: "★"; description: "Ajouter ou retirer cet onglet des favoris";
+                            clicked => { root.toggle-tab-favorite(root.editor-tab-id); root.editor-tab-id = 0; root.editor-mode = 0; }
+                        }
+                        Text { text: "Favori / non favori"; font-size: 12px; color: #d3d5e4; }
+                        IconButton {
+                            label: "⇄"; description: "Déplacer l'onglet dans un espace ou dossier";
+                            clicked => { root.editor-mode = 5; root.editor-resource-id = 0; root.editor-id = 0; }
+                        }
+                        Text { text: "Déplacer vers…"; font-size: 12px; color: #d3d5e4; }
+                    }
                     if (root.editor-mode == 5): ScrollView {
                         vertical-stretch: 1;
                         horizontal-scrollbar-policy: always-off;
                         VerticalLayout {
                             spacing: 5px;
                             for target in root.destinations: Rectangle {
-                                visible: root.editor-resource-id != 0 || target.workspace-id == root.active-workspace-id;
+                                visible: root.editor-tab-id > 0 || root.editor-resource-id != 0 || target.workspace-id == root.active-workspace-id;
                                 height: 34px;
                                 border-radius: 8px;
                                 background: destination-hit.has-hover ? #35354a : #292c3b;
@@ -815,15 +1002,18 @@ export component BrowserWindow inherits Window {
                                 }
                                 destination-hit := TouchArea {
                                     clicked => {
-                                        if (root.editor-resource-id == 0) { root.move-folder(root.editor-id, target.folder-id); }
+                                        if (root.editor-tab-id > 0) {
+                                            root.move-tab(root.editor-tab-id, target.workspace-id, target.folder-id);
+                                        } else if (root.editor-resource-id == 0) { root.move-folder(root.editor-id, target.folder-id); }
                                         else { root.move-entry(root.editor-id, target.workspace-id, target.folder-id); }
+                                        root.editor-tab-id = 0;
                                         root.editor-mode = 0;
                                     }
                                 }
                             }
                         }
                     }
-                    if (root.editor-mode != 5): IconButton {
+                    if (root.editor-mode != 5 && root.editor-mode != 6): IconButton {
                         button-size: 38px;
                         label: "✓";
                         description: "Enregistrer les changements";
@@ -847,7 +1037,7 @@ export component BrowserWindow inherits Window {
                         IconButton {
                             button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
                             description: root.confirm-delete ? "Confirmer la suppression de l'espace (les ressources sont conservées)" : "Supprimer l'espace";
-                            clicked => { if (root.confirm-delete) { root.delete-workspace(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                            clicked => { if (root.confirm-delete) { root.delete-workspace(root.editor-id); root.editor-mode = 0; root.editor-tab-id = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
                         }
                     }
                     if (root.editor-mode == 2 && root.editor-id > 0): HorizontalLayout {
@@ -857,7 +1047,7 @@ export component BrowserWindow inherits Window {
                         IconButton {
                             button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
                             description: "Supprimer le dossier en conservant les ressources";
-                            clicked => { if (root.confirm-delete) { root.delete-folder(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                            clicked => { if (root.confirm-delete) { root.delete-folder(root.editor-id); root.editor-mode = 0; root.editor-tab-id = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
                         }
                     }
                     if (root.editor-mode == 3): HorizontalLayout {
@@ -870,7 +1060,7 @@ export component BrowserWindow inherits Window {
                         if (root.editor-id > 0): IconButton {
                             button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
                             description: "Retirer cette référence (sans fermer l'onglet)";
-                            clicked => { if (root.confirm-delete) { root.remove-entry(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                            clicked => { if (root.confirm-delete) { root.remove-entry(root.editor-id); root.editor-mode = 0; root.editor-tab-id = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
                         }
                     }
                     if (root.confirm-delete): Text { text: "Appuyer de nouveau sur ✓ pour confirmer"; color: #e7aaa9; font-size: 11px; wrap: word-wrap; }

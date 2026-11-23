@@ -507,6 +507,16 @@ fn render_workspaces(ui: &BrowserWindow, state: &WorkspaceSnapshot) {
         title: target.label.as_str().into(),
         depth: target.depth as i32,
     }).collect::<Vec<_>>())));
+    ui.set_search_results(ModelRc::new(VecModel::from(state.search_results.iter().map(|hit| SearchView {
+        kind: hit.kind,
+        workspace_id: hit.workspace_id as i32,
+        tab_id: hit.tab_id.map_or(0, |tab| tab.0 as i32),
+        resource_id: hit.resource_id.unwrap_or(0) as i32,
+        title: hit.title.as_str().into(),
+        subtitle: hit.subtitle.as_str().into(),
+        glyph: glyph(&hit.icon).into(),
+        color: color_from_hex(&hit.color),
+    }).collect::<Vec<_>>())));
 }
 
 fn apply_workspace_command(
@@ -814,6 +824,14 @@ pub fn run(
         workspace_handler!(on_delete_folder, |id| WorkspaceCommand::DeleteFolder(id as u64));
         workspace_handler!(on_move_folder, |id, parent| WorkspaceCommand::MoveFolder { id: id as u64, parent_id: optional_folder(parent) });
         workspace_handler!(on_save_tab, |id| WorkspaceCommand::SaveTab(TabId(id as u64)));
+        workspace_handler!(on_move_tab, |tab, ws, folder| WorkspaceCommand::MoveTab {
+            tab: TabId(tab as u64), workspace_id: ws as u64, folder_id: optional_folder(folder),
+        });
+        workspace_handler!(on_toggle_tab_pin, |id| WorkspaceCommand::ToggleTabPin(TabId(id as u64)));
+        workspace_handler!(on_toggle_tab_favorite, |id| WorkspaceCommand::ToggleTabFavorite(TabId(id as u64)));
+        workspace_handler!(on_search_workspaces, |query, scope| WorkspaceCommand::Search {
+            query: query.to_string(), scope,
+        });
         workspace_handler!(on_add_link, |url, title| WorkspaceCommand::AddLink { url: url.to_string(), title: title.to_string() });
         workspace_handler!(on_open_resource, |id| WorkspaceCommand::OpenResource(id as u64));
         workspace_handler!(on_remove_entry, |id| WorkspaceCommand::RemoveEntry(id as u64));
