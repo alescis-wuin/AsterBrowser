@@ -20,6 +20,10 @@ impl<E: BrowserEngine> Browser<E> {
         }
     }
 
+    /// Hide the current page in the UI without closing or discarding a tab.
+    /// A subsequent activate() still informs CEF which native browser is visible.
+    pub fn clear_active(&mut self) { self.active = None; }
+
     pub fn snapshot(&self) -> BrowserSnapshot {
         BrowserSnapshot {
             tabs: self.tabs.clone(),
@@ -400,3 +404,5 @@ mod input_tests {
         assert_eq!(log.borrow().as_slice(), &[TabId(2)]);
     }
 }
+
+pub mod workspaces;

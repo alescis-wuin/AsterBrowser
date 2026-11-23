@@ -175,3 +175,13 @@ press `Alt+E` to open and lock it. `Ctrl+L` / `Ctrl+K` focus the address bar,
 `Ctrl+T` opens a tab and `Ctrl+W` closes the active tab. The sidebar does not
 change the CEF viewport dimensions. Persisted spaces, folders, tags and local
 file/terminal panels are future work. See [UI stage 1](docs/P6-UI-FIRST-STEP.md).
+
+## P7 — Espaces persistants (candidat)
+
+Aster prend en charge les espaces de travail, dossiers virtuels, références enregistrées,
+favoris, mots-clés, couleurs et icônes depuis la barre latérale Slint. Les URL
+sauvegardées sont rouvertes à la demande, sans restauration automatique massive de
+navigateurs CEF. Les données sont stockées localement dans un JSON versionné sous
+`$XDG_STATE_HOME/aster-browser` (ou `~/.local/state/aster-browser`).
+Voir [docs/P7-WORKSPACES-IMPLEMENTATION.md](docs/P7-WORKSPACES-IMPLEMENTATION.md) pour
+les interactions, garanties, tests et limites. Validation CEF/Wayland requise avant fusion.

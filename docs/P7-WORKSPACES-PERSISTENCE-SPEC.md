@@ -1,6 +1,6 @@
 # Aster — Étape 2 : espaces persistants et organisation des ressources
 
-Statut : **spécification préparatoire, aucune fonctionnalité de l'étape 2 implémentée**.
+Statut : **implémentation candidate sur cette branche ; compilation Rust et validation Slint/CEF requises avant fusion**.
 
 Base : `main` après fusion de la PR #5, commit `2cd32d471895632b566c8b1d13af7318958d5017`.
 Branche dédiée : `feature/aster-workspaces-persistence`.
