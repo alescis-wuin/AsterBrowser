@@ -608,14 +608,16 @@ pub fn run(
     let frames: Rc<RefCell<HashMap<TabId, BufferedRgbSurface>>> = Rc::default();
     let shown_tab = Rc::new(Cell::new(None));
     let latency = Rc::new(RefCell::new(UiLatency::default()));
+    let workspace_view = workspace_bridge.as_ref().map(|_| workspace_state.borrow());
     render(
         &ui,
         &state.borrow(),
         &mut frames.borrow_mut(),
         &shown_tab,
         engine_name,
-        if workspace_bridge.is_some() { Some(&workspace_state.borrow()) } else { None },
+        workspace_view.as_deref(),
     );
+    drop(workspace_view);
     if workspace_bridge.is_some() { render_workspaces(&ui, &workspace_state.borrow()); }
 
     macro_rules! command_handler {
@@ -1039,13 +1041,16 @@ pub fn run(
         let previously_shown = shown_tab.get();
         if changed {
             *state.borrow_mut() = update.snapshot;
+            let workspace_view = tick_workspace_bridge
+                .as_ref()
+                .map(|_| tick_workspace_state.borrow());
             render(
                 &ui,
                 &state.borrow(),
                 &mut image_cache,
                 &shown_tab,
                 engine_name,
-                if tick_workspace_bridge.is_some() { Some(&tick_workspace_state.borrow()) } else { None },
+                workspace_view.as_deref(),
             );
         }
         // Update the Image only when the active surface actually changed.
