@@ -2,11 +2,12 @@
 //! Neither browser-core nor frontend-slint needs CEF or filesystem knowledge.
 use browser_contracts::{
     BrowserCommand, BrowserEngine, BrowserError, BrowserSnapshot, MoveTargetView, SavedItemView,
-    TabId, WorkspaceCommand, WorkspaceSnapshot, WorkspaceView,
+    SearchResultView, TabId, WorkspaceCommand, WorkspaceSnapshot, WorkspaceView,
 };
 use browser_core::{
     Browser,
-    workspaces::{Appearance, SavedResource, WorkspaceDisk, WorkspaceEntry, WorkspaceError, WorkspaceStore},
+    workspaces::{Appearance, SavedResource, WorkspaceDisk, WorkspaceEntry, WorkspaceError, WorkspaceStore,
+                 rank_metadata, search_terms},
 };
 use std::collections::HashMap;
 
@@ -24,6 +25,8 @@ pub struct WorkspaceSession {
     recently_active: HashMap<u64, TabId>,
     message: String,
     revision: u64,
+    search_query: String,
+    search_scope: i32,
 }
 
 fn palette_index(color: &str) -> i32 {
@@ -51,11 +54,11 @@ impl WorkspaceSession {
                 format!("Sauvegarde invalide : {err}. Mode lecture seule ; aucune donnée remplacée."),
             ),
         };
-        Self { store, disk, readonly, bindings: HashMap::new(), recently_active: HashMap::new(), message, revision: 1 }
+        Self { store, disk, readonly, bindings: HashMap::new(), recently_active: HashMap::new(), message, revision: 1, search_query: String::new(), search_scope: 0 }
     }
     #[cfg(test)]
     pub fn in_memory() -> Self {
-        Self { store: WorkspaceStore::default(), disk: WorkspaceDisk::new(std::env::temp_dir().join("aster-should-not-write.json")), readonly: true, bindings: HashMap::new(), recently_active: HashMap::new(), message: String::new(), revision: 1 }
+        Self { store: WorkspaceStore::default(), disk: WorkspaceDisk::new(std::env::temp_dir().join("aster-should-not-write.json")), readonly: true, bindings: HashMap::new(), recently_active: HashMap::new(), message: String::new(), revision: 1, search_query: String::new(), search_scope: 0 }
     }
     pub fn revision(&self) -> u64 { self.revision }
     pub fn reconcile(&mut self, snapshot: &BrowserSnapshot) {
@@ -129,6 +132,113 @@ impl WorkspaceSession {
         if reorganized { self.revision = self.revision.wrapping_add(1); }
         Ok(())
     }
+    fn ensure_saved_tab<E: BrowserEngine>(&mut self, browser: &Browser<E>, id: TabId) -> Result<u64, WorkspaceError> {
+        let tab = browser.snapshot().tabs.into_iter().find(|tab| tab.id == id)
+            .ok_or(WorkspaceError::NotFound("Onglet introuvable"))?;
+        let workspace_id = self.bindings.get(&id).map_or(self.store.active_workspace_id, |binding| binding.workspace_id);
+        let title = if matches!(tab.title.as_str(), "" | "Loading..." | "New tab") {
+            tab.url.clone()
+        } else {
+            tab.title
+        };
+        let title: String = title.chars().take(80).collect();
+        let entry_id = self.store.save_resource(workspace_id, &tab.url, &title, None)?;
+        let resource_id = self.store.entry(entry_id).expect("saved entry exists").resource_id;
+        if let Some(binding) = self.bindings.get_mut(&id) { binding.resource_id = Some(resource_id); }
+        Ok(entry_id)
+    }
+
+    /// Moving a *live tab* never closes or reloads CEF. Its destination gains a
+    /// saved reference while source bookmarks remain untouched.
+    fn move_live_tab<E: BrowserEngine>(&mut self, browser: &Browser<E>, tab_id: TabId,
+        workspace_id: u64, folder_id: Option<u64>) -> Result<(), WorkspaceError> {
+        let tab = browser.snapshot().tabs.into_iter().find(|tab| tab.id == tab_id)
+            .ok_or(WorkspaceError::NotFound("Onglet introuvable"))?;
+        let source = *self.bindings.get(&tab_id).ok_or(WorkspaceError::NotFound("Association d'onglet introuvable"))?;
+        let title = if matches!(tab.title.as_str(), "" | "Loading..." | "New tab") {
+            tab.url.clone()
+        } else { tab.title };
+        let mut draft = self.store.clone();
+        let entry_id = draft.save_resource(workspace_id, &tab.url,
+            &title.chars().take(80).collect::<String>(), folder_id)?;
+        // A destination entry may already exist; the explicit folder choice wins.
+        draft.move_entry(entry_id, workspace_id, folder_id)?;
+        let resource_id = draft.entry(entry_id).expect("saved entry exists").resource_id;
+        if browser.snapshot().active == Some(tab_id) { draft.activate(workspace_id)?; }
+        self.store = draft;
+        self.bindings.insert(tab_id, TabBinding { workspace_id, resource_id: Some(resource_id) });
+        if self.recently_active.get(&source.workspace_id) == Some(&tab_id) {
+            self.recently_active.remove(&source.workspace_id);
+        }
+        self.recently_active.insert(workspace_id, tab_id);
+        Ok(())
+    }
+
+    fn search_results(&self, browser: &BrowserSnapshot) -> Vec<SearchResultView> {
+        let terms = search_terms(&self.search_query);
+        if terms.is_empty() { return Vec::new(); }
+        let mut hits: Vec<(i32, SearchResultView)> = Vec::new();
+        if self.search_scope == 0 {
+            for ws in &self.store.workspaces {
+                if let Some(score) = rank_metadata(&terms, &ws.name, "", &[], "") {
+                    hits.push((score, SearchResultView {
+                        kind: 2, workspace_id: ws.id, title: ws.name.clone(),
+                        subtitle: "Espace de travail".into(), icon: ws.appearance.icon.clone(),
+                        color: ws.appearance.color.clone(), ..Default::default()
+                    }));
+                }
+            }
+        }
+        if matches!(self.search_scope, 0 | 1) {
+            for tab in &browser.tabs {
+                let Some(binding) = self.bindings.get(&tab.id) else { continue; };
+                let (tags, notes) = binding.resource_id.and_then(|id| self.store.resource(id))
+                    .map_or((Vec::new(), String::new()), |r| (r.tags.clone(), r.notes.clone()));
+                if let Some(score) = rank_metadata(&terms, &tab.title, &tab.url, &tags, &notes) {
+                    let ws_name = self.store.workspace(binding.workspace_id).map_or("", |w| w.name.as_str());
+                    hits.push((score + 1, SearchResultView {
+                        kind: 0, workspace_id: binding.workspace_id, tab_id: Some(tab.id),
+                        title: tab.title.clone(), subtitle: format!("Onglet · {ws_name} · {}", tab.url),
+                        icon: "globe".into(), color: "#a7c9ee".into(), ..Default::default()
+                    }));
+                }
+            }
+        }
+        if matches!(self.search_scope, 0 | 2 | 3) {
+            // Distinct per workspace; one resource may legitimately belong to many spaces.
+            let mut seen = std::collections::HashSet::new();
+            for entry in &self.store.entries {
+                let Some(resource) = self.store.resource(entry.resource_id) else { continue; };
+                if self.search_scope == 3 && !resource.favorite { continue; }
+                if !seen.insert((entry.workspace_id, resource.id)) { continue; }
+                if let Some(score) = rank_metadata(&terms, &resource.title, &resource.url, &resource.tags, &resource.notes) {
+                    let ws_name = self.store.workspace(entry.workspace_id).map_or("", |w| w.name.as_str());
+                    hits.push((score + if resource.favorite { 2 } else { 0 }, SearchResultView {
+                        kind: 1, workspace_id: entry.workspace_id, resource_id: Some(resource.id),
+                        title: resource.title.clone(), subtitle: format!("{ws_name} · {}", resource.url),
+                        icon: resource.appearance.icon.clone(), color: resource.appearance.color.clone(),
+                        ..Default::default()
+                    }));
+                }
+            }
+            for resource in self.store.resources.iter().filter(|r| r.favorite
+                && !self.store.entries.iter().any(|e| e.resource_id == r.id)) {
+                if let Some(score) = rank_metadata(&terms, &resource.title, &resource.url, &resource.tags, &resource.notes) {
+                    hits.push((score + 2, SearchResultView {
+                        kind: 1, workspace_id: self.store.active_workspace_id,
+                        resource_id: Some(resource.id), title: resource.title.clone(),
+                        subtitle: resource.url.clone(), icon: resource.appearance.icon.clone(),
+                        color: resource.appearance.color.clone(), ..Default::default()
+                    }));
+                }
+            }
+        }
+        hits.sort_by(|a, b| b.0.cmp(&a.0)
+            .then_with(|| a.1.title.cmp(&b.1.title))
+            .then_with(|| a.1.workspace_id.cmp(&b.1.workspace_id)));
+        hits.into_iter().take(40).map(|(_, result)| result).collect()
+    }
+
     fn resource_row(&self, e: Option<&WorkspaceEntry>, r: &SavedResource, depth: usize) -> SavedItemView {
         let workspace = e.map_or(self.store.active_workspace_id, |entry| entry.workspace_id);
         SavedItemView {
@@ -161,7 +271,7 @@ impl WorkspaceSession {
             self.collect_entries(workspace_id, Some(f.id), depth + 1, out);
         }
     }
-    pub fn projection(&self) -> WorkspaceSnapshot {
+    pub fn projection(&self, browser: &BrowserSnapshot) -> WorkspaceSnapshot {
         let active = self.store.active_workspace_id;
         let mut workspaces: Vec<_> = self.store.workspaces.iter().map(|w| WorkspaceView {
             id: w.id, name: w.name.clone(), icon: w.appearance.icon.clone(),
@@ -187,7 +297,8 @@ impl WorkspaceSession {
                 destinations.push(MoveTargetView { workspace_id: ws.id, folder_id: Some(folder.id), label: ws.name.clone() + " / " + &folder.name, depth: depth + 1 });
             }
         }
-        WorkspaceSnapshot { active_workspace_id: active, workspaces, visible_tab_ids, items, favorites, destinations, message: self.message.clone() }
+        WorkspaceSnapshot { active_workspace_id: active, workspaces, visible_tab_ids, items, favorites,
+            destinations, search_results: self.search_results(browser), message: self.message.clone() }
     }
     fn open_resource<E: BrowserEngine>(&mut self, browser: &mut Browser<E>, id: u64) -> Result<(), String> {
         let resource = self.store.resource(id).ok_or("Ressource introuvable")?.clone();
@@ -237,16 +348,22 @@ impl WorkspaceSession {
             }
             DeleteFolder(id) => self.store.remove_folder(id),
             MoveFolder { id, parent_id } => self.store.move_folder(id, self.store.active_workspace_id, parent_id),
-            SaveTab(id) => {
-                let tab = browser.snapshot().tabs.into_iter().find(|t| t.id == id).ok_or(WorkspaceError::NotFound("Onglet introuvable"))?;
-                let workspace_id = self.bindings.get(&id).map_or(self.store.active_workspace_id, |b| b.workspace_id);
-                let title = if tab.title.trim().is_empty() || tab.title == "Loading..." || tab.title == "New tab" { tab.url.clone() } else { tab.title };
-                let title = title.chars().take(80).collect::<String>();
-                let entry_id = self.store.save_resource(workspace_id, &tab.url, &title, None)?;
-                let resource_id = self.store.entry(entry_id).unwrap().resource_id;
-                if let Some(binding) = self.bindings.get_mut(&id) { binding.resource_id = Some(resource_id); }
-                Ok(())
+            SaveTab(id) => self.ensure_saved_tab(browser, id).map(|_| ()),
+            MoveTab { tab, workspace_id, folder_id } => {
+                self.move_live_tab(browser, tab, workspace_id, folder_id)
             }
+            ToggleTabPin(id) => {
+                let entry_id = self.ensure_saved_tab(browser, id)?;
+                let pinned = self.store.entry(entry_id).expect("saved entry exists").pinned;
+                self.store.set_pin(entry_id, !pinned)
+            }
+            ToggleTabFavorite(id) => {
+                let entry_id = self.ensure_saved_tab(browser, id)?;
+                let resource_id = self.store.entry(entry_id).expect("saved entry exists").resource_id;
+                let favorite = self.store.resource(resource_id).expect("saved resource exists").favorite;
+                self.store.set_favorite(resource_id, !favorite)
+            }
+            Search { .. } => unreachable!("Search is handled without writes"),
             AddLink { url, title } => {
                 let title = if title.trim().is_empty() { url.chars().take(80).collect() } else { title };
                 self.store.save_resource(self.store.active_workspace_id, &url, &title, None).map(|_| ())
@@ -295,6 +412,12 @@ impl WorkspaceSession {
         Ok(())
     }
     pub fn dispatch_workspace<E: BrowserEngine>(&mut self, browser: &mut Browser<E>, cmd: WorkspaceCommand) {
+        if let WorkspaceCommand::Search { query, scope } = cmd {
+            self.search_query = query.chars().take(160).collect();
+            self.search_scope = scope.clamp(0, 3);
+            self.revision = self.revision.wrapping_add(1);
+            return;
+        }
         if self.readonly {
             self.message = "Le stockage est en lecture seule : corriger la sauvegarde avant toute modification".into();
             return;
@@ -332,6 +455,59 @@ mod tests {
         assert_eq!(browser.snapshot().tabs.len(), 1);
     }
     #[test]
+    fn moving_live_tab_preserves_tab_id_and_creates_reopenable_destination() {
+        let mut browser = Browser::new(MockEngine::default());
+        let mut session = WorkspaceSession::in_memory();
+        session.dispatch_browser(&mut browser, BrowserCommand::NewTab { url: "https://example.org".into() }).unwrap();
+        let tab = browser.snapshot().active.unwrap();
+        let original_entry = session.store.save_resource(1, "https://example.org/", "Source", None).unwrap();
+        let target = session.store.create_workspace("Équipe").unwrap();
+        let folder = session.store.create_folder(target, None, "À lire").unwrap();
+        session.store.activate(1).unwrap();
+        session.run_command(&mut browser, WorkspaceCommand::MoveTab { tab, workspace_id: target, folder_id: Some(folder) }).unwrap();
+        assert_eq!(browser.snapshot().active, Some(tab));
+        assert_eq!(browser.snapshot().tabs.len(), 1);
+        assert_eq!(session.store.active_workspace_id, target);
+        assert!(session.store.entry(original_entry).is_some());
+        let entry = session.store.entries.iter().find(|e| e.workspace_id == target).unwrap();
+        assert_eq!(entry.folder_id, Some(folder));
+        let entry_id = entry.id;
+        assert_eq!(session.bindings.get(&tab).unwrap().workspace_id, target);
+        session.dispatch_browser(&mut browser, BrowserCommand::CloseTab(tab)).unwrap();
+        assert!(session.store.entry(entry_id).is_some());
+    }
+    #[test]
+    fn tab_actions_auto_save_and_search_reaches_other_workspaces() {
+        let mut browser = Browser::new(MockEngine::default());
+        let mut session = WorkspaceSession::in_memory();
+        session.dispatch_browser(&mut browser, BrowserCommand::NewTab { url: "https://example.org".into() }).unwrap();
+        let tab = browser.snapshot().active.unwrap();
+        session.run_command(&mut browser, WorkspaceCommand::ToggleTabPin(tab)).unwrap();
+        session.run_command(&mut browser, WorkspaceCommand::ToggleTabFavorite(tab)).unwrap();
+        assert!(session.store.entries[0].pinned);
+        assert!(session.store.resources[0].favorite);
+        let next = session.store.create_workspace("Recherche").unwrap();
+        session.store.activate(next).unwrap();
+        session.search_query = "example".into();
+        session.search_scope = 3;
+        let hits = session.projection(&browser.snapshot()).search_results;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].resource_id, Some(session.store.resources[0].id));
+        session.search_scope = 0;
+        assert_eq!(session.projection(&browser.snapshot()).search_results.len(), 2);
+    }
+    #[test]
+    fn invalid_tab_move_keeps_existing_binding_and_store() {
+        let mut browser = Browser::new(MockEngine::default());
+        let mut session = WorkspaceSession::in_memory();
+        session.dispatch_browser(&mut browser, BrowserCommand::NewTab { url: "https://example.org".into() }).unwrap();
+        let tab = browser.snapshot().active.unwrap();
+        let original = session.store.clone();
+        assert!(session.move_live_tab(&browser, tab, 999, Some(5)).is_err());
+        assert_eq!(session.store, original);
+        assert_eq!(session.bindings.get(&tab).unwrap().workspace_id, 1);
+    }
+    #[test]
     fn workspace_switch_does_not_close_other_tabs() {
         let mut browser = Browser::new(MockEngine::default());
         let mut session = WorkspaceSession::in_memory();
@@ -345,7 +521,7 @@ mod tests {
         session.select_visible(&mut browser).unwrap();
         assert_eq!(browser.snapshot().active, Some(first));
         assert_eq!(browser.snapshot().tabs.len(), 2);
-        assert_eq!(session.projection().visible_tab_ids.len(), 1);
+        assert_eq!(session.projection(&browser.snapshot()).visible_tab_ids.len(), 1);
         assert_eq!(next, 2);
     }
 }

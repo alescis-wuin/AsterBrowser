@@ -151,6 +151,51 @@ fn checked_tags(input: Vec<String>) -> Result<Vec<String>> {
     Ok(tags)
 }
 
+/// Simple, deterministic, case/accent-insensitive matching for local metadata.
+/// No document content is indexed or transmitted; all query tokens must match.
+pub fn fold_search(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    for c in input.to_lowercase().chars() {
+        match c {
+            'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => normalized.push('a'),
+            'ç' => normalized.push('c'),
+            'è' | 'é' | 'ê' | 'ë' => normalized.push('e'),
+            'ì' | 'í' | 'î' | 'ï' => normalized.push('i'),
+            'ñ' => normalized.push('n'),
+            'ò' | 'ó' | 'ô' | 'ö' | 'õ' => normalized.push('o'),
+            'ù' | 'ú' | 'û' | 'ü' => normalized.push('u'),
+            'ý' | 'ÿ' => normalized.push('y'),
+            'œ' => normalized.push_str("oe"),
+            'æ' => normalized.push_str("ae"),
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+pub fn search_terms(query: &str) -> Vec<String> {
+    fold_search(query).split_whitespace().take(12).map(str::to_owned).collect()
+}
+
+/// Title > tags > URL > notes. Returns None unless every token is present.
+pub fn rank_metadata(terms: &[String], title: &str, url: &str, tags: &[String], notes: &str) -> Option<i32> {
+    if terms.is_empty() { return None; }
+    let name = fold_search(title);
+    let address = fold_search(url);
+    let annotations = fold_search(notes);
+    let keywords = fold_search(&tags.join(" "));
+    let mut score = 0;
+    for term in terms {
+        let part = if name.contains(term.as_str()) { 40 }
+            else if keywords.contains(term.as_str()) { 30 }
+            else if address.contains(term.as_str()) { 15 }
+            else if annotations.contains(term.as_str()) { 5 }
+            else { return None; };
+        score += part;
+    }
+    Some(score)
+}
+
 impl Default for WorkspaceStore {
     fn default() -> Self {
         Self {
@@ -538,6 +583,15 @@ mod tests {
         let w = s.active_workspace();
         s.save_resource(w, "https://example.org/", "Exemple", None).unwrap();
         s
+    }
+    #[test]
+    fn metadata_search_is_accent_insensitive_and_requires_all_terms() {
+        let terms = search_terms("  vidÉo   Forêt ");
+        assert_eq!(terms, vec!["video", "foret"]);
+        assert_eq!(rank_metadata(&terms, "Vidéo", "https://example.org", &["forêt".into()], ""), Some(70));
+        assert_eq!(rank_metadata(&terms, "Vidéo", "https://example.org", &[], ""), None);
+        assert_eq!(rank_metadata(&search_terms(""), "Vidéo", "", &[], ""), None);
+        assert_eq!(fold_search("Cœur d'œuvre"), "coeur d'oeuvre");
     }
     #[test]
     fn folders_and_cross_workspace_references() {
