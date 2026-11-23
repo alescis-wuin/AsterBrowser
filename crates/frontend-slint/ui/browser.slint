@@ -694,7 +694,7 @@ export component BrowserWindow inherits Window {
                                     (root.search-scope == 1 ? "Onglets uniquement" :
                                     (root.search-scope == 2 ? "Ressources uniquement" : "Favoris uniquement"));
                                 clicked => {
-                                    root.search-scope = (root.search-scope + 1) % 4;
+                                    root.search-scope = root.search-scope == 3 ? 0 : root.search-scope + 1;
                                     root.search-workspaces(root.search-query, root.search-scope);
                                 }
                             }
