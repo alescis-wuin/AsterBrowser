@@ -1,6 +1,7 @@
 //! Composition root. Core/contracts do not depend on the UI toolkit or CEF.
 #[cfg(feature = "benchmark-control")]
 mod benchmark_adapter;
+mod workspace_session;
 #[cfg(target_os = "linux")]
 mod fontconfig;
 #[cfg(target_os = "linux")]
@@ -15,18 +16,43 @@ use browser_core::Browser;
 #[cfg(not(feature = "cef"))]
 use browser_core::MockEngine;
 use std::{cell::RefCell, rc::Rc};
+use workspace_session::WorkspaceSession;
 
 fn dispatch_for<E: BrowserEngine + 'static>(
     browser: &Rc<RefCell<Browser<E>>>,
+    workspaces: &Rc<RefCell<WorkspaceSession>>,
 ) -> frontend_slint::Dispatcher {
     let browser = Rc::clone(browser);
+    let workspaces = Rc::clone(workspaces);
     Rc::new(move |command| {
         let mut browser = browser.borrow_mut();
-        if let Err(error) = browser.dispatch(command) {
+        if let Err(error) = workspaces.borrow_mut().dispatch_browser(&mut browser, command) {
             eprintln!("browser command failed: {error}");
         }
         browser.snapshot()
     })
+}
+
+fn workspace_bridge<E: BrowserEngine + 'static>(
+    browser: &Rc<RefCell<Browser<E>>>,
+    workspaces: &Rc<RefCell<WorkspaceSession>>,
+) -> frontend_slint::WorkspacesIntegration {
+    let initial = workspaces.borrow().projection();
+    let dispatch_browser = Rc::clone(browser);
+    let dispatch_store = Rc::clone(workspaces);
+    let projection_store = Rc::clone(workspaces);
+    let revision_store = Rc::clone(workspaces);
+    frontend_slint::WorkspacesIntegration {
+        initial,
+        dispatch: Rc::new(move |command| {
+            let mut browser = dispatch_browser.borrow_mut();
+            let mut workspaces = dispatch_store.borrow_mut();
+            workspaces.dispatch_workspace(&mut browser, command);
+            (browser.snapshot(), workspaces.projection())
+        }),
+        snapshot: Rc::new(move || projection_store.borrow().projection()),
+        revision: Rc::new(move || revision_store.borrow().revision()),
+    }
 }
 
 fn input_for<E: BrowserEngine + 'static>(
@@ -48,12 +74,20 @@ fn run_mock() -> Result<(), Box<dyn std::error::Error>> {
         url: "about:blank".into(),
     })?;
     let initial: BrowserSnapshot = browser.snapshot();
+    let mut workspaces = WorkspaceSession::load();
+    workspaces.attach_initial(&initial);
     let shared = Rc::new(RefCell::new(browser));
-    let dispatcher = dispatch_for(&shared);
+    let workspaces = Rc::new(RefCell::new(workspaces));
+    let dispatcher = dispatch_for(&shared, &workspaces);
     let input_dispatcher = input_for(&shared);
     let poller: frontend_slint::Poller = {
         let shared = Rc::clone(&shared);
-        Rc::new(move || shared.borrow_mut().tick())
+        let workspaces = Rc::clone(&workspaces);
+        Rc::new(move || {
+            let tick = shared.borrow_mut().tick();
+            workspaces.borrow_mut().reconcile(&tick.snapshot);
+            tick
+        })
     };
     frontend_slint::run(
         initial,
@@ -61,7 +95,8 @@ fn run_mock() -> Result<(), Box<dyn std::error::Error>> {
         input_dispatcher,
         poller,
         "Mock engine",
-        frontend_slint::FrontendConfig::cpu(options.buffers.for_cpu()),
+        frontend_slint::FrontendConfig::cpu(options.buffers.for_cpu())
+            .with_workspaces(workspace_bridge(&shared, &workspaces)),
     )?;
     shared.borrow_mut().close_all()?;
     Ok(())
@@ -189,15 +224,22 @@ fn run_cef() -> Result<(), Box<dyn std::error::Error>> {
         url: initial_url.into(),
     })?;
     let initial = browser.snapshot();
+    let mut workspaces = WorkspaceSession::load();
+    workspaces.attach_initial(&initial);
     let shared = Rc::new(RefCell::new(browser));
-    let dispatcher = dispatch_for(&shared);
+    let workspaces = Rc::new(RefCell::new(workspaces));
+    let dispatcher = dispatch_for(&shared, &workspaces);
+    frontend = frontend.with_workspaces(workspace_bridge(&shared, &workspaces));
     let input_dispatcher = input_for(&shared);
     let poller: frontend_slint::Poller = {
         let shared = Rc::clone(&shared);
+        let workspaces = Rc::clone(&workspaces);
         let pump = runtime.pump_handle();
         Rc::new(move || {
             pump.pump_if_due();
-            shared.borrow_mut().tick()
+            let tick = shared.borrow_mut().tick();
+            workspaces.borrow_mut().reconcile(&tick.snapshot);
+            tick
         })
     };
     if options.pump.mode == PumpMode::Event {

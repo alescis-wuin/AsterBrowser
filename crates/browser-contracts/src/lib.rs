@@ -18,6 +18,75 @@ pub struct BrowserSnapshot {
     pub active: Option<TabId>,
 }
 
+/// Engine-neutral projection of persistent workspaces for a native frontend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceView {
+    pub id: u64,
+    pub name: String,
+    pub icon: String,
+    pub color: String,
+    pub palette: i32,
+    pub icon_index: i32,
+    pub count: usize,
+    pub active: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedItemView {
+    pub id: u64, // Entry ID, or zero for a favorite without an entry.
+    pub resource_id: u64, // Zero for a virtual folder.
+    pub folder: bool,
+    pub title: String,
+    pub subtitle: String,
+    pub notes: String,
+    pub tags: String,
+    pub icon: String,
+    pub color: String,
+    pub palette: i32,
+    pub icon_index: i32,
+    pub depth: usize,
+    pub pinned: bool,
+    pub favorite: bool,
+    pub live: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MoveTargetView {
+    pub workspace_id: u64,
+    pub folder_id: Option<u64>,
+    pub label: String,
+    pub depth: usize,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceSnapshot {
+    pub active_workspace_id: u64,
+    pub workspaces: Vec<WorkspaceView>,
+    pub visible_tab_ids: Vec<TabId>,
+    pub items: Vec<SavedItemView>,
+    pub favorites: Vec<SavedItemView>,
+    pub destinations: Vec<MoveTargetView>,
+    pub message: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceCommand {
+    CreateWorkspace { title: String },
+    RenameWorkspace { id: u64, title: String, color: String, icon: String },
+    DeleteWorkspace(u64),
+    ReorderWorkspace { id: u64, direction: i32 },
+    ActivateWorkspace(u64),
+    CreateFolder { parent_id: Option<u64>, title: String },
+    EditFolder { id: u64, title: String, color: String, icon: String },
+    DeleteFolder(u64),
+    MoveFolder { id: u64, parent_id: Option<u64> },
+    SaveTab(TabId),
+    AddLink { url: String, title: String },
+    OpenResource(u64),
+    RemoveEntry(u64),
+    MoveEntry { id: u64, workspace_id: u64, folder_id: Option<u64> },
+    ReorderEntry { id: u64, direction: i32 },
+    TogglePin(u64),
+    ToggleFavorite(u64),
+    EditResource { id: u64, title: String, notes: String, tags: String, color: String, icon: String },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerAction {
     Down,

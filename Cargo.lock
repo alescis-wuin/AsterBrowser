@@ -636,6 +636,9 @@ name = "browser-core"
 version = "0.1.0"
 dependencies = [
  "browser-contracts",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

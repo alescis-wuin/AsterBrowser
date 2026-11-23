@@ -3,6 +3,7 @@ mod frame_surface;
 use browser_contracts::{
     BrowserCommand, BrowserKey, BrowserSnapshot, BrowserTick, BufferCount, InputModifiers,
     KeyAction, KeyInput, PointerAction, PointerButton, TabId,
+    WorkspaceCommand, WorkspaceSnapshot,
 };
 use frame_surface::{BufferedRgbSurface, UpdateKind};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -135,10 +136,21 @@ pub struct EventPumpConfig {
     pub next_delay: Rc<dyn Fn() -> Duration>,
 }
 
+/// Optional workspace bridge. The core owns persistent data and the desktop
+/// supplies commands; frontend-slint only presents immutable projections.
+#[derive(Clone)]
+pub struct WorkspacesIntegration {
+    pub initial: WorkspaceSnapshot,
+    pub dispatch: Rc<dyn Fn(WorkspaceCommand) -> (BrowserSnapshot, WorkspaceSnapshot)>,
+    pub snapshot: Rc<dyn Fn() -> WorkspaceSnapshot>,
+    pub revision: Rc<dyn Fn() -> u64>,
+}
+
 pub struct FrontendConfig {
     pub buffers: BufferCount,
     pub event_pump: Option<EventPumpConfig>,
     pub external_control: Option<Rc<dyn Fn() -> Vec<ExternalUiAction>>>,
+    pub workspaces: Option<WorkspacesIntegration>,
     #[cfg(feature = "gpu")]
     pub gpu_frame_notifications: bool,
     #[cfg(feature = "gpu")]
@@ -150,11 +162,16 @@ impl FrontendConfig {
             buffers,
             event_pump: None,
             external_control: None,
+            workspaces: None,
             #[cfg(feature = "gpu")]
             gpu_frame_notifications: false,
             #[cfg(feature = "gpu")]
             gpu: None,
         }
+    }
+    pub fn with_workspaces(mut self, integration: WorkspacesIntegration) -> Self {
+        self.workspaces = Some(integration);
+        self
     }
     pub fn with_external_control(mut self, handler: Rc<dyn Fn() -> Vec<ExternalUiAction>>) -> Self {
         self.external_control = Some(handler);
@@ -336,6 +353,10 @@ fn process_cpu_time() -> Option<Duration> {
     None
 }
 
+fn optional_folder(id: i32) -> Option<u64> {
+    (id > 0).then_some(id as u64)
+}
+
 pub type Dispatcher = Rc<dyn Fn(BrowserCommand) -> BrowserSnapshot>;
 /// Dispatches high-frequency input without cloning tab state.
 pub type InputDispatcher = Rc<dyn Fn(BrowserCommand)>;
@@ -404,10 +425,12 @@ fn render(
     frames: &mut HashMap<TabId, BufferedRgbSurface>,
     shown_tab: &Cell<Option<TabId>>,
     engine_name: &str,
+    workspaces: Option<&WorkspaceSnapshot>,
 ) {
     let tabs: Vec<TabView> = snapshot
         .tabs
         .iter()
+        .filter(|tab| workspaces.is_none_or(|ws| ws.visible_tab_ids.contains(&tab.id)))
         .map(|tab| TabView {
             id: tab.id.0 as i32,
             title: SharedString::from(tab.title.as_str()),
@@ -435,6 +458,79 @@ fn render(
     frames.retain(|id, _| snapshot.tabs.iter().any(|tab| tab.id == *id));
 }
 
+fn color_from_hex(input: &str) -> slint::Color {
+    let bytes = input.strip_prefix('#').unwrap_or("");
+    let parse = |from| u8::from_str_radix(bytes.get(from..from + 2).unwrap_or(""), 16).unwrap_or(145);
+    slint::Color::from_rgb_u8(parse(0), parse(2), parse(4))
+}
+fn glyph(icon: &str) -> &'static str {
+    match icon {
+        "code" => "⌘", "film" => "▧", "book" => "▤", "star" => "★", "folder" => "▱",
+        "globe" => "◉", "file" => "▣", "cloud" => "☁", "terminal" => ">_",
+        "pin" => "◆", "link" => "⌁", _ => "▦",
+    }
+}
+fn render_workspaces(ui: &BrowserWindow, state: &WorkspaceSnapshot) {
+    ui.set_active_workspace_id(state.active_workspace_id as i32);
+    ui.set_workspace_message(state.message.as_str().into());
+    ui.set_spaces(ModelRc::new(VecModel::from(state.workspaces.iter().map(|w| SpaceView {
+        id: w.id as i32,
+        title: w.name.as_str().into(),
+        active: w.active,
+        color: color_from_hex(&w.color),
+        color_hex: w.color.as_str().into(),
+        icon: w.icon.as_str().into(),
+        count: w.count as i32,
+    }).collect::<Vec<_>>() )));
+    let to_row = |item: &browser_contracts::SavedItemView| SavedView {
+        id: item.id as i32,
+        resource_id: item.resource_id as i32,
+        folder: item.folder,
+        title: item.title.as_str().into(),
+        subtitle: item.subtitle.as_str().into(),
+        notes: item.notes.as_str().into(),
+        tags: item.tags.as_str().into(),
+        color: color_from_hex(&item.color),
+        color_hex: item.color.as_str().into(),
+        icon: item.icon.as_str().into(),
+        glyph: glyph(&item.icon).into(),
+        depth: item.depth as i32,
+        pinned: item.pinned,
+        favorite: item.favorite,
+        live: item.live,
+    };
+    ui.set_saved_items(ModelRc::new(VecModel::from(state.items.iter().map(&to_row).collect::<Vec<_>>())));
+    ui.set_favorites(ModelRc::new(VecModel::from(state.favorites.iter().map(&to_row).collect::<Vec<_>>())));
+    ui.set_destinations(ModelRc::new(VecModel::from(state.destinations.iter().map(|target| DestinationView {
+        workspace_id: target.workspace_id as i32,
+        folder_id: target.folder_id.unwrap_or(0) as i32,
+        title: target.label.as_str().into(),
+        depth: target.depth as i32,
+    }).collect::<Vec<_>>())));
+}
+
+fn apply_workspace_command(
+    command: WorkspaceCommand,
+    ui: &slint::Weak<BrowserWindow>,
+    state: &Rc<RefCell<BrowserSnapshot>>,
+    workspace_state: &Rc<RefCell<WorkspaceSnapshot>>,
+    frames: &Rc<RefCell<HashMap<TabId, BufferedRgbSurface>>>,
+    shown_tab: &Rc<Cell<Option<TabId>>>,
+    dispatch: &Rc<dyn Fn(WorkspaceCommand) -> (BrowserSnapshot, WorkspaceSnapshot)>,
+    engine_name: &str,
+) {
+    let (browser, workspace) = dispatch(command);
+    *state.borrow_mut() = browser;
+    *workspace_state.borrow_mut() = workspace;
+    if let Some(ui) = ui.upgrade() {
+        render(
+            &ui, &state.borrow(), &mut frames.borrow_mut(), shown_tab,
+            engine_name, Some(&workspace_state.borrow()),
+        );
+        render_workspaces(&ui, &workspace_state.borrow());
+    }
+}
+
 fn apply_command(
     command: BrowserCommand,
     ui: &slint::Weak<BrowserWindow>,
@@ -443,18 +539,21 @@ fn apply_command(
     shown_tab: &Rc<Cell<Option<TabId>>>,
     dispatcher: &Dispatcher,
     engine_name: &str,
+    workspace_state: &Rc<RefCell<WorkspaceSnapshot>>,
 ) {
     let snapshot = dispatcher(command);
     let changed = *state.borrow() != snapshot;
     if changed {
         *state.borrow_mut() = snapshot;
         if let Some(ui) = ui.upgrade() {
+            let workspace = workspace_state.borrow();
             render(
                 &ui,
                 &state.borrow(),
                 &mut frames.borrow_mut(),
                 shown_tab,
                 engine_name,
+                if workspace.workspaces.is_empty() { None } else { Some(&workspace) },
             );
         }
     }
@@ -504,16 +603,22 @@ pub fn run(
     #[cfg(feature = "gpu")]
     let last_gpu_image: Rc<RefCell<Option<(TabId, u64)>>> = Rc::default();
     let state = Rc::new(RefCell::new(initial));
+    let workspace_bridge = config.workspaces.clone();
+    let workspace_state = Rc::new(RefCell::new(workspace_bridge.as_ref().map_or_else(WorkspaceSnapshot::default, |w| w.initial.clone())));
     let frames: Rc<RefCell<HashMap<TabId, BufferedRgbSurface>>> = Rc::default();
     let shown_tab = Rc::new(Cell::new(None));
     let latency = Rc::new(RefCell::new(UiLatency::default()));
+    let workspace_view = workspace_bridge.as_ref().map(|_| workspace_state.borrow());
     render(
         &ui,
         &state.borrow(),
         &mut frames.borrow_mut(),
         &shown_tab,
         engine_name,
+        workspace_view.as_deref(),
     );
+    drop(workspace_view);
+    if workspace_bridge.is_some() { render_workspaces(&ui, &workspace_state.borrow()); }
 
     macro_rules! command_handler {
         ($name:ident, $make:expr) => {{
@@ -522,6 +627,7 @@ pub fn run(
             let frames = frames.clone();
             let shown_tab = shown_tab.clone();
             let dispatcher = dispatcher.clone();
+            let workspace_state = workspace_state.clone();
             ui.$name(move || {
                 apply_command(
                     $make,
@@ -531,6 +637,7 @@ pub fn run(
                     &shown_tab,
                     &dispatcher,
                     engine_name,
+                    &workspace_state,
                 )
             });
         }};
@@ -547,6 +654,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_close_tab(move |id| {
             apply_command(
                 BrowserCommand::CloseTab(TabId(id as u64)),
@@ -556,6 +664,7 @@ pub fn run(
                 &shown_tab,
                 &dispatcher,
                 engine_name,
+                &workspace_state,
             )
         });
     }
@@ -565,6 +674,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_select_tab(move |id| {
             apply_command(
                 BrowserCommand::ActivateTab(TabId(id as u64)),
@@ -574,6 +684,7 @@ pub fn run(
                 &shown_tab,
                 &dispatcher,
                 engine_name,
+                &workspace_state,
             )
         });
     }
@@ -583,6 +694,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_navigate(move |text| {
             let active = state.borrow().active;
             if let Some(tab) = active {
@@ -597,6 +709,7 @@ pub fn run(
                     &shown_tab,
                     &dispatcher,
                     engine_name,
+                    &workspace_state,
                 );
             }
         });
@@ -607,6 +720,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_back(move || {
             let active = state.borrow().active;
             if let Some(tab) = active {
@@ -618,6 +732,7 @@ pub fn run(
                     &shown_tab,
                     &dispatcher,
                     engine_name,
+                    &workspace_state,
                 );
             }
         });
@@ -628,6 +743,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_forward(move || {
             let active = state.borrow().active;
             if let Some(tab) = active {
@@ -639,6 +755,7 @@ pub fn run(
                     &shown_tab,
                     &dispatcher,
                     engine_name,
+                    &workspace_state,
                 );
             }
         });
@@ -649,6 +766,7 @@ pub fn run(
         let frames = frames.clone();
         let shown_tab = shown_tab.clone();
         let dispatcher = dispatcher.clone();
+        let workspace_state = workspace_state.clone();
         ui.on_reload(move || {
             let active = state.borrow().active;
             if let Some(tab) = active {
@@ -660,8 +778,54 @@ pub fn run(
                     &shown_tab,
                     &dispatcher,
                     engine_name,
+                    &workspace_state,
                 );
             }
+        });
+    }
+    if let Some(workspaces) = workspace_bridge.as_ref() {
+        macro_rules! workspace_handler {
+            ($callback:ident, |$($argument:ident),+| $action:expr) => {{
+                let weak = ui.as_weak();
+                let state = state.clone();
+                let workspace_state = workspace_state.clone();
+                let frames = frames.clone();
+                let shown_tab = shown_tab.clone();
+                let dispatch = workspaces.dispatch.clone();
+                ui.$callback(move |$($argument),+| {
+                    apply_workspace_command(
+                        $action, &weak, &state, &workspace_state, &frames,
+                        &shown_tab, &dispatch, engine_name,
+                    );
+                });
+            }};
+        }
+        workspace_handler!(on_create_workspace, |title| WorkspaceCommand::CreateWorkspace { title: title.to_string() });
+        workspace_handler!(on_edit_workspace, |id, title, color, icon| WorkspaceCommand::RenameWorkspace {
+            id: id as u64, title: title.to_string(), color: color.to_string(), icon: icon.to_string()
+        });
+        workspace_handler!(on_delete_workspace, |id| WorkspaceCommand::DeleteWorkspace(id as u64));
+        workspace_handler!(on_reorder_workspace, |id, direction| WorkspaceCommand::ReorderWorkspace { id: id as u64, direction });
+        workspace_handler!(on_switch_workspace, |id| WorkspaceCommand::ActivateWorkspace(id as u64));
+        workspace_handler!(on_create_folder, |parent, title| WorkspaceCommand::CreateFolder { parent_id: optional_folder(parent), title: title.to_string() });
+        workspace_handler!(on_edit_folder, |id, title, color, icon| WorkspaceCommand::EditFolder {
+            id: id as u64, title: title.to_string(), color: color.to_string(), icon: icon.to_string()
+        });
+        workspace_handler!(on_delete_folder, |id| WorkspaceCommand::DeleteFolder(id as u64));
+        workspace_handler!(on_move_folder, |id, parent| WorkspaceCommand::MoveFolder { id: id as u64, parent_id: optional_folder(parent) });
+        workspace_handler!(on_save_tab, |id| WorkspaceCommand::SaveTab(TabId(id as u64)));
+        workspace_handler!(on_add_link, |url, title| WorkspaceCommand::AddLink { url: url.to_string(), title: title.to_string() });
+        workspace_handler!(on_open_resource, |id| WorkspaceCommand::OpenResource(id as u64));
+        workspace_handler!(on_remove_entry, |id| WorkspaceCommand::RemoveEntry(id as u64));
+        workspace_handler!(on_move_entry, |id, ws, parent| WorkspaceCommand::MoveEntry {
+            id: id as u64, workspace_id: ws as u64, folder_id: optional_folder(parent),
+        });
+        workspace_handler!(on_reorder_entry, |id, direction| WorkspaceCommand::ReorderEntry { id: id as u64, direction });
+        workspace_handler!(on_toggle_entry_pin, |id| WorkspaceCommand::TogglePin(id as u64));
+        workspace_handler!(on_toggle_resource_favorite, |id| WorkspaceCommand::ToggleFavorite(id as u64));
+        workspace_handler!(on_edit_resource, |id, title, notes, tags, color, icon| WorkspaceCommand::EditResource {
+            id: id as u64, title: title.to_string(), notes: notes.to_string(), tags: tags.to_string(),
+            color: color.to_string(), icon: icon.to_string(),
         });
     }
     {
@@ -785,6 +949,9 @@ pub fn run(
     let tick_gpu_hub = gpu.clone();
     #[cfg(feature = "gpu")]
     let tick_gpu_image = last_gpu_image.clone();
+    let tick_workspace_bridge = workspace_bridge.clone();
+    let tick_workspace_state = workspace_state.clone();
+    let mut workspace_revision = tick_workspace_bridge.as_ref().map_or(0, |bridge| (bridge.revision)());
     let tick_latency = latency.clone();
     let mut cpu_since = process_cpu_time();
     let signal_for_stats = event_pump.as_ref().map(|p| p.signal.clone());
@@ -853,16 +1020,37 @@ pub fn run(
                 convert_max = convert_max.max(duration);
             }
         }
+        if let Some(bridge) = tick_workspace_bridge.as_ref() {
+            let revision = (bridge.revision)();
+            if revision != workspace_revision {
+                workspace_revision = revision;
+                let latest = (bridge.snapshot)();
+                *tick_workspace_state.borrow_mut() = latest;
+                render_workspaces(&ui, &tick_workspace_state.borrow());
+                // The visible tab list may change without a BrowserSnapshot change.
+                // Keep CEF frame caches for tabs in other workspaces intact.
+                let visible = tick_workspace_state.borrow();
+                let tabs: Vec<TabView> = update.snapshot.tabs.iter()
+                    .filter(|t| visible.visible_tab_ids.contains(&t.id))
+                    .map(|t| TabView { id: t.id.0 as i32, title: t.title.as_str().into(), active: update.snapshot.active == Some(t.id) })
+                    .collect();
+                ui.set_tabs(ModelRc::new(VecModel::from(tabs)));
+            }
+        }
         let changed = *state.borrow() != update.snapshot;
         let previously_shown = shown_tab.get();
         if changed {
             *state.borrow_mut() = update.snapshot;
+            let workspace_view = tick_workspace_bridge
+                .as_ref()
+                .map(|_| tick_workspace_state.borrow());
             render(
                 &ui,
                 &state.borrow(),
                 &mut image_cache,
                 &shown_tab,
                 engine_name,
+                workspace_view.as_deref(),
             );
         }
         // Update the Image only when the active surface actually changed.

@@ -1,11 +1,43 @@
 import { LineEdit, ScrollView } from "std-widgets.slint";
 
-// UI-only tab representation. Workspaces and saved resources will be modeled
-// by browser-core in the next stage; don't manufacture persisted spaces here.
+// Native projections of the Rust workspace store; no filesystem or CEF here.
 export struct TabView {
     id: int,
     title: string,
     active: bool,
+}
+
+export struct SpaceView {
+    id: int,
+    title: string,
+    active: bool,
+    color: color,
+    color-hex: string,
+    icon: string,
+    count: int,
+}
+export struct SavedView {
+    id: int,
+    resource-id: int,
+    folder: bool,
+    title: string,
+    subtitle: string,
+    notes: string,
+    tags: string,
+    color: color,
+    color-hex: string,
+    icon: string,
+    glyph: string,
+    depth: int,
+    pinned: bool,
+    favorite: bool,
+    live: bool,
+}
+export struct DestinationView {
+    workspace-id: int,
+    folder-id: int,
+    title: string,
+    depth: int,
 }
 
 component IconButton inherits Rectangle {
@@ -39,6 +71,63 @@ component IconButton inherits Rectangle {
     }
     hit := TouchArea {
         clicked => { root.clicked(); }
+    }
+}
+
+component SidebarSpace inherits Rectangle {
+    in property <string> title;
+    in property <string> glyph;
+    in property <color> accent;
+    in property <int> count;
+    in property <bool> active;
+    callback chosen();
+    callback editing();
+
+    height: 38px;
+    border-radius: 9px;
+    border-width: root.active ? 1px : 0px;
+    border-color: #ffffff28;
+    background: root.active ? root.accent.mix(#20242f, 0.30) : (space-hit.has-hover ? root.accent.mix(#222432, 0.18) : #222432);
+    accessible-role: list-item;
+    accessible-label: root.title;
+    space-hit := TouchArea { clicked => { root.chosen(); } }
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 5px;
+        spacing: 5px;
+        Text { text: root.glyph; color: root.accent; font-size: 17px; vertical-alignment: center; }
+        Text { text: root.title; color: #dfe1ee; font-size: 13px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+        Text { text: "" + root.count; color: #9299ad; font-size: 11px; vertical-alignment: center; }
+        IconButton { button-size: 25px; label: "⋯"; description: "Modifier l'espace"; clicked => { root.editing(); } }
+    }
+}
+
+component SavedRow inherits Rectangle {
+    in property <string> title;
+    in property <string> glyph;
+    in property <color> accent;
+    in property <int> depth;
+    in property <bool> folder;
+    in property <bool> pinned;
+    in property <bool> favorite;
+    in property <bool> live;
+    callback opened();
+    callback editing();
+
+    height: 40px;
+    border-radius: 8px;
+    background: open-area.has-hover ? root.accent.mix(#222432, 0.20) : root.accent.mix(#222432, 0.08);
+    accessible-role: list-item;
+    accessible-label: root.title;
+    open-area := TouchArea { clicked => { if (root.folder) { root.editing(); } else { root.opened(); } } }
+    HorizontalLayout {
+        padding-left: 5px + 12px * root.depth;
+        padding-right: 3px;
+        spacing: 5px;
+        Text { text: root.glyph; color: root.accent; font-size: 15px; vertical-alignment: center; }
+        Text { text: root.title; color: #d3d5e4; font-size: 12px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        Text { text: root.pinned ? "◆" : (root.favorite ? "★" : (root.live ? "●" : "")); color: #b8a9ee; font-size: 11px; vertical-alignment: center; }
+        IconButton { button-size: 25px; label: "⋯"; description: "Organiser ou personnaliser"; clicked => { root.editing(); } }
     }
 }
 
@@ -110,6 +199,25 @@ export component BrowserWindow inherits Window {
     min-height: 430px;
     background: #10121b;
 
+    in property <[SpaceView]> spaces;
+    in property <[SavedView]> saved-items;
+    in property <[SavedView]> favorites;
+    in property <[DestinationView]> destinations;
+    in property <int> active-workspace-id: 1;
+    in property <string> workspace-message;
+    private property <bool> favorites-only: false;
+    // In-panel editor state, entirely transient; validation happens in Rust.
+    private property <int> editor-mode: 0; // 1=space, 2=folder, 3=resource, 4=URL, 5=move
+    private property <int> editor-id: 0;
+    private property <int> editor-resource-id: 0;
+    private property <int> editor-parent-id: 0;
+    private property <string> editor-title: "";
+    private property <string> editor-url: "";
+    private property <string> editor-notes: "";
+    private property <string> editor-tags: "";
+    private property <string> editor-color: "#9ddac8";
+    private property <string> editor-icon: "grid";
+    private property <bool> confirm-delete: false;
     in property <[TabView]> tabs;
     in property <int> active-tab-id: -1;
     in property <string> current-url;
@@ -137,6 +245,24 @@ export component BrowserWindow inherits Window {
     callback page-key(string, int, bool, bool, bool, bool, bool);
     callback page-focus(bool);
 
+    callback create-workspace(string);
+    callback edit-workspace(int, string, string, string);
+    callback delete-workspace(int);
+    callback reorder-workspace(int, int);
+    callback switch-workspace(int);
+    callback create-folder(int, string);
+    callback edit-folder(int, string, string, string);
+    callback delete-folder(int);
+    callback move-folder(int, int);
+    callback save-tab(int);
+    callback add-link(string, string);
+    callback open-resource(int);
+    callback remove-entry(int);
+    callback move-entry(int, int, int);
+    callback reorder-entry(int, int);
+    callback toggle-entry-pin(int);
+    callback toggle-resource-favorite(int);
+    callback edit-resource(int, string, string, string, string, string);
     callback toggle-sidebar();
     toggle-sidebar => {
         if (root.sidebar-open && root.sidebar-locked) {
@@ -424,30 +550,47 @@ export component BrowserWindow inherits Window {
                             }
                         }
                     }
+                    ScrollView {
+                        height: root.height < 650px ? 90px : 150px;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            width: 267px;
+                            spacing: 4px;
+                            for space in root.spaces: SidebarSpace {
+                                title: space.title;
+                                glyph: space.icon == "code" ? "⌘" : (space.icon == "film" ? "▧" : (space.icon == "star" ? "★" : "▦"));
+                                accent: space.color;
+                                count: space.count;
+                                active: space.active && !root.favorites-only;
+                                chosen => { root.favorites-only = false; root.switch-workspace(space.id); }
+                                editing => {
+                                    root.sidebar-locked = true;
+                                    close-delay.stop();
+                                    root.editor-mode = 1;
+                                    root.editor-id = space.id;
+                                    root.editor-title = space.title;
+                                    root.editor-color = space.color-hex;
+                                    root.editor-icon = space.icon;
+                                    root.confirm-delete = false;
+                                }
+                            }
+                            SidebarSpace {
+                                title: "Favoris"; glyph: "★"; accent: #e5c9a2;
+                                count: root.favorites.length; active: root.favorites-only;
+                                chosen => { root.favorites-only = true; }
+                                editing => { root.favorites-only = true; }
+                            }
+                        }
+                    }
                     Rectangle {
-                        height: 44px;
-                        border-radius: 10px;
-                        background: #2c3f3b;
-                        border-color: #9ddac82c;
-                        border-width: 1px;
+                        height: 29px;
                         HorizontalLayout {
-                            padding-left: 12px;
-                            spacing: 10px;
-                            Text { text: "▦"; font-size: 19px; color: #bcebdd; vertical-alignment: center; }
-                            Text {
-                                text: "Navigation";
-                                color: #d3eae1;
-                                font-size: 13px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
+                            spacing: 5px;
+                            IconButton {
+                                button-size: 28px; label: "+"; description: "Créer un espace";
+                                clicked => { root.editor-mode = 1; root.editor-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "grid"; root.sidebar-locked = true; close-delay.stop(); }
                             }
-                            Text {
-                                text: "" + root.tabs.length;
-                                color: #90b9b0;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { width: 7px; }
+                            Text { text: "Créer un espace"; color: #9499ad; font-size: 11px; vertical-alignment: center; }
                         }
                     }
                     Rectangle { height: 12px; background: #00000000; }
@@ -495,27 +638,91 @@ export component BrowserWindow inherits Window {
                             }
                         }
                     }
+                    Rectangle { height: 1px; background: #343544; }
                     Rectangle {
-                        height: 1px;
-                        background: #343544;
-                    }
-                    Rectangle {
-                        height: 62px;
-                        VerticalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
+                        height: 37px;
+                        HorizontalLayout {
+                            padding-left: 5px;
                             spacing: 4px;
                             Text {
-                                text: "Dossiers et espaces enregistrés";
-                                color: #b7aacd;
+                                text: root.favorites-only ? "Favoris enregistrés" : "Ressources et dossiers";
+                                color: #b6accf;
                                 font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
                             }
-                            Text {
-                                text: "Disponible dans la prochaine étape";
-                                color: #787f94;
-                                font-size: 11px;
+                            IconButton {
+                                button-size: 28px;
+                                label: "+";
+                                description: "Ajouter une URL enregistrée";
+                                clicked => { root.editor-mode = 4; root.editor-title = ""; root.editor-url = "https://"; root.sidebar-locked = true; close-delay.stop(); }
+                            }
+                            IconButton {
+                                button-size: 28px;
+                                label: "▱";
+                                description: "Créer un dossier virtuel";
+                                clicked => { root.favorites-only = false; root.editor-mode = 2; root.editor-id = 0; root.editor-parent-id = 0; root.editor-title = ""; root.editor-color = "#9ddac8"; root.editor-icon = "folder"; root.sidebar-locked = true; close-delay.stop(); }
                             }
                         }
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            width: 267px;
+                            spacing: 5px;
+                            for item in (root.favorites-only ? root.favorites : root.saved-items): SavedRow {
+                                title: item.title;
+                                depth: item.depth;
+                                glyph: item.folder ? "▱" : (item.icon == "code" ? "⌘" : (item.icon == "film" ? "▣" : "◫"));
+                                accent: item.color;
+                                folder: item.folder;
+                                pinned: item.pinned;
+                                favorite: item.favorite;
+                                live: item.live;
+                                opened => { root.open-resource(item.resource-id); }
+                                editing => {
+                                    root.sidebar-locked = true; close-delay.stop();
+                                    root.editor-mode = item.folder ? 2 : 3;
+                                    root.editor-id = item.id;
+                                    root.editor-resource-id = item.resource-id;
+                                    root.editor-title = item.title;
+                                    root.editor-url = item.subtitle;
+                                    root.editor-notes = item.notes;
+                                    root.editor-tags = item.tags;
+                                    root.editor-color = item.color-hex;
+                                    root.editor-icon = item.icon;
+                                    root.editor-parent-id = 0;
+                                    root.confirm-delete = false;
+                                }
+                            }
+                            if ((root.favorites-only ? root.favorites.length : root.saved-items.length) == 0): Text {
+                                text: "Aucune ressource enregistrée";
+                                color: #8e93a9;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 42px;
+                        HorizontalLayout {
+                            padding-left: 5px;
+                            spacing: 6px;
+                            IconButton {
+                                button-size: 31px;
+                                label: "☆";
+                                description: "Enregistrer l'onglet actif";
+                                clicked => { if (root.active-tab-id >= 0) { root.save-tab(root.active-tab-id); } }
+                            }
+                            Text { text: "Enregistrer l'onglet actif"; color: #9aa0b6; font-size: 11px; vertical-alignment: center; }
+                        }
+                    }
+                    if (root.workspace-message != ""): Text {
+                        text: root.workspace-message;
+                        color: #e7aaa9;
+                        font-size: 11px;
+                        wrap: word-wrap;
                     }
                     Rectangle {
                         height: 20px;
@@ -527,6 +734,146 @@ export component BrowserWindow inherits Window {
                             horizontal-alignment: center;
                         }
                     }
+                }
+            }
+            // Modal-like panel editor. It captures pointer events and pins the sidebar
+            // while a form is in use; CEF remains at the same viewport size.
+            editor-overlay := Rectangle {
+                visible: root.editor-mode != 0;
+                x: 0px; y: 0px;
+                width: parent.width; height: parent.height;
+                border-radius: 16px;
+                background: #1b1e2b;
+                TouchArea { width: parent.width; height: parent.height; }
+                VerticalLayout {
+                    padding: 13px;
+                    spacing: 11px;
+                    HorizontalLayout {
+                        spacing: 7px;
+                        Text {
+                            text: root.editor-mode == 1 ? "Espace" : (root.editor-mode == 2 ? "Dossier" : (root.editor-mode == 3 ? "Ressource" : (root.editor-mode == 4 ? "Enregistrer une URL" : "Ranger")));
+                            font-size: 17px;
+                            color: #ececf6;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        IconButton { label: "×"; description: "Fermer l'éditeur"; clicked => { root.editor-mode = 0; root.confirm-delete = false; } }
+                    }
+                    Rectangle { height: 1px; background: #383744; }
+                    editor-fields := ScrollView {
+                        visible: root.editor-mode != 5;
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            spacing: 8px;
+                            Text { text: "Nom ou titre"; font-size: 12px; color: #a7aac0; }
+                            name-field := LineEdit { text: root.editor-title; placeholder-text: "Nom"; }
+                            if (root.editor-mode == 4): Text { text: "Adresse URL HTTP(S)"; font-size: 12px; color: #a7aac0; }
+                            url-field := LineEdit { visible: root.editor-mode == 4; text: root.editor-url; placeholder-text: "https://example.org"; }
+                            if (root.editor-mode == 3): Text { text: "Note"; font-size: 12px; color: #a7aac0; }
+                            note-field := LineEdit { visible: root.editor-mode == 3; text: root.editor-notes; placeholder-text: "Annotation"; }
+                            if (root.editor-mode == 3): Text { text: "Mots-clés (séparés par des virgules)"; font-size: 12px; color: #a7aac0; }
+                            tags-field := LineEdit { visible: root.editor-mode == 3; text: root.editor-tags; placeholder-text: "lecture, recherche"; }
+                            if (root.editor-mode != 4): Text { text: "Couleur (#RRGGBB)"; font-size: 12px; color: #a7aac0; }
+                            color-field := LineEdit { visible: root.editor-mode != 4; text: root.editor-color; placeholder-text: "#9ddac8"; }
+                            if (root.editor-mode != 4): HorizontalLayout {
+                                spacing: 5px;
+                                IconButton { label: "●"; description: "Vert doux"; clicked => { root.editor-color = "#9ddac8"; } }
+                                IconButton { label: "●"; description: "Lilas"; clicked => { root.editor-color = "#bdacfc"; } }
+                                IconButton { label: "●"; description: "Bleu"; clicked => { root.editor-color = "#a7c9ee"; } }
+                                IconButton { label: "●"; description: "Sable"; clicked => { root.editor-color = "#e5c9a2"; } }
+                                IconButton { label: "●"; description: "Rose"; clicked => { root.editor-color = "#e7aaa9"; } }
+                            }
+                            if (root.editor-mode != 4): Text { text: "Icône"; font-size: 12px; color: #a7aac0; }
+                            icon-field := LineEdit { visible: root.editor-mode != 4; text: root.editor-icon; placeholder-text: "grid"; }
+                            if (root.editor-mode != 4): Text {
+                                text: "grid, code, film, book, star, folder, globe, file, cloud, terminal, pin, link";
+                                color: #8b90a7;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                            }
+                            Rectangle { height: 8px; }
+                        }
+                    }
+                    if (root.editor-mode == 5): ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            spacing: 5px;
+                            for target in root.destinations: Rectangle {
+                                visible: root.editor-resource-id != 0 || target.workspace-id == root.active-workspace-id;
+                                height: 34px;
+                                border-radius: 8px;
+                                background: destination-hit.has-hover ? #35354a : #292c3b;
+                                Text {
+                                    x: 8px; y: 5px;
+                                    width: parent.width - 16px;
+                                    text: target.title;
+                                    color: #d8d9e9;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                                destination-hit := TouchArea {
+                                    clicked => {
+                                        if (root.editor-resource-id == 0) { root.move-folder(root.editor-id, target.folder-id); }
+                                        else { root.move-entry(root.editor-id, target.workspace-id, target.folder-id); }
+                                        root.editor-mode = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (root.editor-mode != 5): IconButton {
+                        button-size: 38px;
+                        label: "✓";
+                        description: "Enregistrer les changements";
+                        clicked => {
+                            if (root.editor-mode == 1) {
+                                if (root.editor-id == 0) { root.create-workspace(name-field.text); }
+                                else { root.edit-workspace(root.editor-id, name-field.text, color-field.text, icon-field.text); }
+                            } else if (root.editor-mode == 2) {
+                                if (root.editor-id == 0) { root.create-folder(root.editor-parent-id, name-field.text); }
+                                else { root.edit-folder(root.editor-id, name-field.text, color-field.text, icon-field.text); }
+                            } else if (root.editor-mode == 3) {
+                                root.edit-resource(root.editor-resource-id, name-field.text, note-field.text, tags-field.text, color-field.text, icon-field.text);
+                            } else if (root.editor-mode == 4) { root.add-link(url-field.text, name-field.text); }
+                            root.editor-mode = 0;
+                        }
+                    }
+                    if (root.editor-mode == 1 && root.editor-id > 0): HorizontalLayout {
+                        spacing: 4px;
+                        IconButton { button-size: 30px; label: "↑"; description: "Monter l'espace"; clicked => { root.reorder-workspace(root.editor-id, -1); } }
+                        IconButton { button-size: 30px; label: "↓"; description: "Descendre l'espace"; clicked => { root.reorder-workspace(root.editor-id, 1); } }
+                        IconButton {
+                            button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
+                            description: root.confirm-delete ? "Confirmer la suppression de l'espace (les ressources sont conservées)" : "Supprimer l'espace";
+                            clicked => { if (root.confirm-delete) { root.delete-workspace(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                        }
+                    }
+                    if (root.editor-mode == 2 && root.editor-id > 0): HorizontalLayout {
+                        spacing: 4px;
+                        IconButton { button-size: 30px; label: "+"; description: "Créer un sous-dossier"; clicked => { root.editor-parent-id = root.editor-id; root.editor-id = 0; root.editor-title = ""; } }
+                        IconButton { button-size: 30px; label: "⇄"; description: "Déplacer le dossier"; clicked => { root.editor-resource-id = 0; root.editor-mode = 5; } }
+                        IconButton {
+                            button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
+                            description: "Supprimer le dossier en conservant les ressources";
+                            clicked => { if (root.confirm-delete) { root.delete-folder(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                        }
+                    }
+                    if (root.editor-mode == 3): HorizontalLayout {
+                        spacing: 4px;
+                        IconButton { button-size: 30px; label: "★"; description: "Favori"; clicked => { root.toggle-resource-favorite(root.editor-resource-id); } }
+                        if (root.editor-id > 0): IconButton { button-size: 30px; label: "◆"; description: "Épingler / désépingler"; clicked => { root.toggle-entry-pin(root.editor-id); } }
+                        if (root.editor-id > 0): IconButton { button-size: 30px; label: "↑"; description: "Monter"; clicked => { root.reorder-entry(root.editor-id, -1); } }
+                        if (root.editor-id > 0): IconButton { button-size: 30px; label: "↓"; description: "Descendre"; clicked => { root.reorder-entry(root.editor-id, 1); } }
+                        if (root.editor-id > 0): IconButton { button-size: 30px; label: "⇄"; description: "Ranger"; clicked => { root.editor-mode = 5; } }
+                        if (root.editor-id > 0): IconButton {
+                            button-size: 30px; label: root.confirm-delete ? "✓" : "⊗";
+                            description: "Retirer cette référence (sans fermer l'onglet)";
+                            clicked => { if (root.confirm-delete) { root.remove-entry(root.editor-id); root.editor-mode = 0; root.confirm-delete = false; } else { root.confirm-delete = true; } }
+                        }
+                    }
+                    if (root.confirm-delete): Text { text: "Appuyer de nouveau sur ✓ pour confirmer"; color: #e7aaa9; font-size: 11px; wrap: word-wrap; }
                 }
             }
         }
