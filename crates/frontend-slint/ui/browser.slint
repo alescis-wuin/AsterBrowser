@@ -685,7 +685,7 @@ export component BrowserWindow inherits Window {
                                 placeholder-text: "Rechercher partout...";
                                 font-size: 12px;
                                 horizontal-stretch: 1;
-                                changed text => { root.search-workspaces(text, root.search-scope); }
+                                changed text => { root.search-workspaces(self.text, root.search-scope); }
                             }
                             IconButton {
                                 button-size: 27px;
