@@ -166,3 +166,12 @@ uv run --project benchmarks python -m aster_bench run --suite gpu --displays hos
 ```
 
 Voir [docs/P5-BENCHMARKS.md](docs/P5-BENCHMARKS.md) pour les modes et limites.
+
+## First UI/UX integration — sidebar organizer
+
+The Slint window now uses a minimal dark omnibar and a left-edge, floating
+organizer listing **live tabs only**. Hover at the left edge to reveal it, or
+press `Alt+E` to open and lock it. `Ctrl+L` / `Ctrl+K` focus the address bar,
+`Ctrl+T` opens a tab and `Ctrl+W` closes the active tab. The sidebar does not
+change the CEF viewport dimensions. Persisted spaces, folders, tags and local
+file/terminal panels are future work. See [UI stage 1](docs/P6-UI-FIRST-STEP.md).

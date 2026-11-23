@@ -415,6 +415,7 @@ fn render(
         })
         .collect();
     ui.set_tabs(ModelRc::new(VecModel::from(tabs)));
+    ui.set_active_tab_id(snapshot.active.map_or(-1, |tab| tab.0 as i32));
     let current = snapshot
         .tabs
         .iter()

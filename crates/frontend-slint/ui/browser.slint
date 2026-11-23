@@ -1,84 +1,127 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 
+// UI-only tab representation. Workspaces and saved resources will be modeled
+// by browser-core in the next stage; don't manufacture persisted spaces here.
 export struct TabView {
     id: int,
     title: string,
     active: bool,
 }
 
-component ToolbarButton inherits Rectangle {
+component IconButton inherits Rectangle {
     in property <string> label;
+    in property <string> description: label;
+    in property <length> button-size: 34px;
     callback clicked();
-    width: 34px;
-    height: 34px;
-    border-radius: 8px;
-    background: hit.pressed ? #384353 : (hit.has-hover ? #303946 : #252b36);
+
+    width: root.button-size;
+    height: root.button-size;
+    border-radius: 9px;
+    background: hit.pressed ? #343b50 : (hit.has-hover || keyboard.has-focus ? #292e40 : #00000000);
+    accessible-role: button;
+    accessible-label: root.description;
+
     Text {
         text: root.label;
-        color: #e5e7eb;
-        font-size: 16px;
+        color: hit.has-hover || keyboard.has-focus ? #ececf6 : #9ba3b8;
+        font-size: 17px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    hit := TouchArea { clicked => { root.clicked(); } }
+    keyboard := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                accept
+            } else { reject }
+        }
+    }
+    hit := TouchArea {
+        clicked => { root.clicked(); }
+    }
 }
 
-component TabChip inherits Rectangle {
+component SidebarTab inherits Rectangle {
     in property <string> title;
     in property <bool> active;
     callback activated();
     callback closed();
-    width: 190px;
-    height: 36px;
-    border-radius: 9px;
-    background: root.active ? #303d52 : #202733;
-    border-width: root.active ? 1px : 0px;
-    border-color: #5689de;
 
-    // The tab activation area sits *under* the close button.
-    activate-hit := TouchArea { clicked => { root.activated(); } }
-    HorizontalLayout {
-        padding-left: 11px;
-        padding-right: 7px;
-        spacing: 5px;
-        Text {
-            text: root.title;
-            color: root.active ? #ffffff : #bcc8dc;
-            overflow: elide;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
+    height: 45px;
+    border-radius: 10px;
+    border-width: root.active ? 1px : 0px;
+    border-color: #bfaffc31;
+    background: root.active ? #302d46 : (activate-hit.has-hover ? #292c3d : #222433);
+    accessible-role: list-item;
+    accessible-label: root.title;
+
+    keyboard := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.activated();
+                accept
+            } else { reject }
         }
+    }
+    activate-hit := TouchArea {
+        clicked => { root.activated(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 7px;
         Rectangle {
-            width: 22px;
-            height: 22px;
-            border-radius: 5px;
-            background: close-hit.has-hover ? #52627b : #00000000;
+            width: 25px;
+            height: 25px;
+            border-radius: 7px;
+            background: root.active ? #655484 : #343349;
             Text {
-                text: "×";
-                color: #e1e8f4;
+                text: "◫";
+                color: root.active ? #e0d5ff : #9f9ab8;
+                font-size: 15px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-            close-hit := TouchArea { clicked => { root.closed(); } }
+        }
+        Text {
+            text: root.title;
+            color: root.active ? #eeeafd : #bec2d3;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        IconButton {
+            label: "×";
+            description: "Fermer l'onglet " + root.title;
+            button-size: 26px;
+            clicked => { root.closed(); }
         }
     }
 }
 
 export component BrowserWindow inherits Window {
-    title: "Aster Browser — P0 Chromium";
-    preferred-width: 1120px;
-    preferred-height: 740px;
+    title: "Aster Browser";
+    preferred-width: 1280px;
+    preferred-height: 790px;
     min-width: 650px;
-    min-height: 400px;
-    background: #0f1318;
+    min-height: 430px;
+    background: #10121b;
 
     in property <[TabView]> tabs;
+    in property <int> active-tab-id: -1;
     in property <string> current-url;
     in property <string> status-text;
     in property <image> page-image;
     in property <bool> has-page;
     out property <int> viewport-width: page-surface.width / 1px;
     out property <int> viewport-height: page-surface.height / 1px;
+
+    // Transient UI state only, never a Chromium tab property.
+    private property <bool> sidebar-open: false;
+    private property <bool> sidebar-locked: false;
 
     callback add-tab();
     callback close-tab(int);
@@ -94,137 +137,395 @@ export component BrowserWindow inherits Window {
     callback page-key(string, int, bool, bool, bool, bool, bool);
     callback page-focus(bool);
 
-    VerticalLayout {
-        spacing: 0px;
-        Rectangle {
-            height: 47px;
-            background: #181d25;
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                padding-top: 5px;
-                padding-bottom: 5px;
-                spacing: 6px;
-                for tab in tabs: TabChip {
-                    title: tab.title;
-                    active: tab.active;
-                    activated => { root.select-tab(tab.id); }
-                    closed => { root.close-tab(tab.id); }
-                }
-                ToolbarButton { label: "+"; clicked => { root.add-tab(); } }
-            }
+    callback toggle-sidebar();
+    toggle-sidebar => {
+        if (root.sidebar-open && root.sidebar-locked) {
+            root.sidebar-locked = false;
+            root.sidebar-open = false;
+        } else {
+            root.sidebar-locked = true;
+            root.sidebar-open = true;
         }
-        Rectangle {
-            height: 52px;
-            background: #141b24;
-            HorizontalLayout {
-                padding: 8px;
-                spacing: 8px;
-                ToolbarButton { label: "←"; clicked => { root.back(); } }
-                ToolbarButton { label: "→"; clicked => { root.forward(); } }
-                ToolbarButton { label: "↻"; clicked => { root.reload(); } }
-                address := LineEdit {
-                    text: root.current-url;
-                    horizontal-stretch: 1;
-                    accepted => { root.navigate(self.text); }
-                }
-                ToolbarButton { label: "Go"; clicked => { root.navigate(address.text); } }
-            }
-        }
-        page-surface := Rectangle {
-            background: #0f1318;
-            vertical-stretch: 1;
-            Image {
-                visible: root.has-page;
-                source: root.page-image;
-                image-fit: fill;
-                width: parent.width;
-                height: parent.height;
-            }
-            VerticalLayout {
-                visible: !root.has-page;
-                alignment: center;
-                spacing: 12px;
-                Text {
-                    text: "Aster Browser";
-                    font-size: 30px;
-                    color: #e5e7eb;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: root.status-text;
-                    color: #94a3b8;
-                    horizontal-alignment: center;
-                }
-            }
-            page-focus-scope := FocusScope {
-                width: parent.width;
-                height: parent.height;
-                focus-on-tab-navigation: false;
-                focus-on-click: false;
-                focus-gained(reason) => { root.page-focus(true); }
-                focus-lost(reason) => { root.page-focus(false); }
-                key-pressed(event) => {
-                    root.page-key(event.text, 0, event.modifiers.shift,
-                                  event.modifiers.control, event.modifiers.alt,
-                                  event.modifiers.meta, event.repeat);
-                    accept
-                }
-                key-released(event) => {
-                    root.page-key(event.text, 1, event.modifiers.shift,
-                                  event.modifiers.control, event.modifiers.alt,
-                                  event.modifiers.meta, false);
-                    accept
-                }
+        open-delay.stop();
+        close-delay.stop();
+    }
 
-                page-hit := TouchArea {
-                    property <int> pressed-button: 0;
-                    property <bool> pointer-shift: false;
-                    property <bool> pointer-control: false;
-                    property <bool> pointer-alt: false;
-                    property <bool> pointer-meta: false;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            page-focus-scope.focus();
-                            self.pointer-shift = event.modifiers.shift;
-                            self.pointer-control = event.modifiers.control;
-                            self.pointer-alt = event.modifiers.alt;
-                            self.pointer-meta = event.modifiers.meta;
-                            if (event.button == PointerEventButton.left) { self.pressed-button = 1; }
-                            else if (event.button == PointerEventButton.right) { self.pressed-button = 2; }
-                            else if (event.button == PointerEventButton.middle) { self.pressed-button = 3; }
-                            if (self.pressed-button > 0) {
+    open-delay := Timer {
+        interval: 150ms;
+        running: false;
+        triggered() => {
+            self.stop();
+            if (edge-trigger.has-hover && !root.sidebar-open) {
+                root.sidebar-open = true;
+                close-delay.start();
+            }
+        }
+    }
+    close-delay := Timer {
+        interval: 1000ms;
+        running: false;
+        triggered() => {
+            self.stop();
+            if (!root.sidebar-locked && !sidebar-hover.has-hover && !edge-trigger.has-hover) {
+                root.sidebar-open = false;
+            }
+        }
+    }
+
+    // This focus scope wraps the page as well as the controls so shortcuts
+    // remain available when a site has the keyboard focus.
+    shell-focus := FocusScope {
+        width: root.width;
+        height: root.height;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+
+        KeyBinding {
+            keys: @keys(Control + L);
+            activated => { address.focus(); address.select-all(); }
+        }
+        KeyBinding {
+            keys: @keys(Control + K);
+            activated => { address.focus(); address.select-all(); }
+        }
+        KeyBinding {
+            keys: @keys(Control + T);
+            activated => { root.add-tab(); }
+        }
+        KeyBinding {
+            keys: @keys(Control + W);
+            activated => {
+                if (root.active-tab-id >= 0) { root.close-tab(root.active-tab-id); }
+            }
+        }
+        KeyBinding {
+            keys: @keys(Alt + E);
+            activated => { root.toggle-sidebar(); }
+        }
+        KeyBinding {
+            keys: @keys(Escape);
+            enabled: root.sidebar-open && !root.sidebar-locked;
+            activated => { root.sidebar-open = false; close-delay.stop(); }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            header := Rectangle {
+                height: 67px;
+                background: #171923;
+                // The address bar remains available even when the organizer is hidden.
+                IconButton {
+                    x: 36px;
+                    y: 17px;
+                    label: "☷";
+                    description: "Afficher ou verrouiller les espaces (Alt+E)";
+                    clicked => { root.toggle-sidebar(); }
+                }
+                omni := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 13px;
+                    width: min(625px, root.width - 180px);
+                    height: 42px;
+                    border-radius: 12px;
+                    background: #202330;
+                    border-width: 1px;
+                    border-color: address.has-focus ? #b4a1e5 : #353645;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 5px;
+                        spacing: 1px;
+                        IconButton { label: "←"; description: "Page précédente"; clicked => { root.back(); } }
+                        IconButton { label: "→"; description: "Page suivante"; clicked => { root.forward(); } }
+                        IconButton { label: "↻"; description: "Actualiser"; clicked => { root.reload(); } }
+                        address := LineEdit {
+                            text: root.current-url;
+                            placeholder-text: "Rechercher ou saisir une URL";
+                            font-size: 14px;
+                            horizontal-stretch: 1;
+                            accepted(text) => { root.navigate(text); }
+                        }
+                        IconButton { label: "↵"; description: "Naviguer"; clicked => { root.navigate(address.text); } }
+                    }
+                }
+                IconButton {
+                    x: parent.width - 53px;
+                    y: 17px;
+                    label: "+";
+                    description: "Nouvel onglet (Ctrl+T)";
+                    clicked => { root.add-tab(); }
+                }
+            }
+            page-surface := Rectangle {
+                background: #0f1318;
+                vertical-stretch: 1;
+                Image {
+                    visible: root.has-page;
+                    source: root.page-image;
+                    image-fit: fill;
+                    width: parent.width;
+                    height: parent.height;
+                }
+                VerticalLayout {
+                    visible: !root.has-page;
+                    alignment: center;
+                    spacing: 12px;
+                    Text {
+                        text: "Aster Browser";
+                        font-size: 30px;
+                        color: #e5e7eb;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.status-text;
+                        color: #94a3b8;
+                        horizontal-alignment: center;
+                    }
+                }
+                page-focus-scope := FocusScope {
+                    width: parent.width;
+                    height: parent.height;
+                    focus-on-tab-navigation: false;
+                    focus-on-click: false;
+                    focus-gained(reason) => { root.page-focus(true); }
+                    focus-lost(reason) => { root.page-focus(false); }
+                    key-pressed(event) => {
+                        root.page-key(event.text, 0, event.modifiers.shift,
+                                      event.modifiers.control, event.modifiers.alt,
+                                      event.modifiers.meta, event.repeat);
+                        accept
+                    }
+                    key-released(event) => {
+                        root.page-key(event.text, 1, event.modifiers.shift,
+                                      event.modifiers.control, event.modifiers.alt,
+                                      event.modifiers.meta, false);
+                        accept
+                    }
+
+                    page-hit := TouchArea {
+                        property <int> pressed-button: 0;
+                        property <bool> pointer-shift: false;
+                        property <bool> pointer-control: false;
+                        property <bool> pointer-alt: false;
+                        property <bool> pointer-meta: false;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                page-focus-scope.focus();
+                                self.pointer-shift = event.modifiers.shift;
+                                self.pointer-control = event.modifiers.control;
+                                self.pointer-alt = event.modifiers.alt;
+                                self.pointer-meta = event.modifiers.meta;
+                                if (event.button == PointerEventButton.left) { self.pressed-button = 1; }
+                                else if (event.button == PointerEventButton.right) { self.pressed-button = 2; }
+                                else if (event.button == PointerEventButton.middle) { self.pressed-button = 3; }
+                                if (self.pressed-button > 0) {
+                                    root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                                      0, self.pressed-button,
+                                                      event.modifiers.shift, event.modifiers.control,
+                                                      event.modifiers.alt, event.modifiers.meta);
+                                }
+                            } else if (event.kind == PointerEventKind.up) {
+                                if (self.pressed-button > 0) {
+                                    root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
+                                                      1, self.pressed-button,
+                                                      event.modifiers.shift, event.modifiers.control,
+                                                      event.modifiers.alt, event.modifiers.meta);
+                                }
+                                self.pressed-button = 0;
+                            } else if (event.kind == PointerEventKind.cancel) {
                                 root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
-                                                  0, self.pressed-button,
-                                                  event.modifiers.shift, event.modifiers.control,
-                                                  event.modifiers.alt, event.modifiers.meta);
+                                                  3, 0, false, false, false, false);
+                                self.pressed-button = 0;
                             }
-                        } else if (event.kind == PointerEventKind.up) {
-                            if (self.pressed-button > 0) {
-                                root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
-                                                  1, self.pressed-button,
-                                                  event.modifiers.shift, event.modifiers.control,
-                                                  event.modifiers.alt, event.modifiers.meta);
-                            }
-                            self.pressed-button = 0;
-                        } else if (event.kind == PointerEventKind.cancel) {
+                        }
+                        moved => {
                             root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
-                                              3, 0, false, false, false, false);
-                            self.pressed-button = 0;
+                                              2, self.pressed-button,
+                                              self.pointer-shift, self.pointer-control,
+                                              self.pointer-alt, self.pointer-meta);
+                        }
+                        scroll-event(event) => {
+                            root.page-scroll(self.mouse-x / 1px, self.mouse-y / 1px,
+                                             event.delta-x / 1px, event.delta-y / 1px,
+                                             event.modifiers.shift, event.modifiers.control,
+                                             event.modifiers.alt, event.modifiers.meta);
+                            accept
                         }
                     }
-                    moved => {
-                        root.page-pointer(self.mouse-x / 1px, self.mouse-y / 1px,
-                                          2, self.pressed-button,
-                                          self.pointer-shift, self.pointer-control,
-                                          self.pointer-alt, self.pointer-meta);
+                }
+            }
+        }
+
+        // A narrow, full-height edge target; outside this region the web page
+        // continues receiving unchanged pointer coordinates.
+        edge-trigger := TouchArea {
+            x: 0px;
+            y: 0px;
+            width: 24px;
+            height: root.height;
+            enabled: !root.sidebar-open;
+            mouse-cursor: pointer;
+            changed has-hover => {
+                if (self.has-hover && !root.sidebar-open) { open-delay.start(); }
+                else { open-delay.stop(); }
+            }
+            clicked => { root.toggle-sidebar(); }
+        }
+
+        organizer := Rectangle {
+            x: root.sidebar-open ? 12px : -320px;
+            y: 12px;
+            width: 300px;
+            height: min(root.height - 24px, 800px);
+            border-radius: 17px;
+            background: #1b1e2bf8;
+            border-width: 1px;
+            border-color: #ffffff19;
+            animate x { duration: 180ms; }
+
+            // Background hover region. The close timer never changes viewport
+            // dimensions and does not perform a CEF resize.
+            sidebar-hover := TouchArea {
+                changed has-hover => {
+                    if (self.has-hover) { close-delay.stop(); }
+                    else if (root.sidebar-open && !root.sidebar-locked) { close-delay.start(); }
+                }
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+                    Rectangle {
+                        height: 34px;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            spacing: 7px;
+                            Text {
+                                text: "Espaces";
+                                color: #b6bacc;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            IconButton {
+                                label: root.sidebar-locked ? "▣" : "□";
+                                description: root.sidebar-locked ? "Désépingler la barre" : "Épingler la barre";
+                                clicked => {
+                                    root.sidebar-locked = !root.sidebar-locked;
+                                    if (root.sidebar-locked) { close-delay.stop(); }
+                                    else if (!sidebar-hover.has-hover) { close-delay.start(); }
+                                }
+                            }
+                            IconButton {
+                                label: "×";
+                                description: "Masquer les espaces";
+                                clicked => {
+                                    root.sidebar-locked = false;
+                                    root.sidebar-open = false;
+                                    close-delay.stop();
+                                }
+                            }
+                        }
                     }
-                    scroll-event(event) => {
-                        root.page-scroll(self.mouse-x / 1px, self.mouse-y / 1px,
-                                         event.delta-x / 1px, event.delta-y / 1px,
-                                         event.modifiers.shift, event.modifiers.control,
-                                         event.modifiers.alt, event.modifiers.meta);
-                        accept
+                    Rectangle {
+                        height: 44px;
+                        border-radius: 10px;
+                        background: #2c3f3b;
+                        border-color: #9ddac82c;
+                        border-width: 1px;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            spacing: 10px;
+                            Text { text: "▦"; font-size: 19px; color: #bcebdd; vertical-alignment: center; }
+                            Text {
+                                text: "Navigation";
+                                color: #d3eae1;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: "" + root.tabs.length;
+                                color: #90b9b0;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { width: 7px; }
+                        }
+                    }
+                    Rectangle { height: 12px; background: #00000000; }
+                    Rectangle { height: 1px; background: #373845; }
+                    Rectangle {
+                        height: 36px;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            spacing: 4px;
+                            Text {
+                                text: "Onglets ouverts";
+                                color: #8e93a9;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            IconButton {
+                                label: "+";
+                                description: "Nouvel onglet";
+                                button-size: 29px;
+                                clicked => { root.add-tab(); }
+                            }
+                        }
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            width: 267px;
+                            spacing: 5px;
+                            for tab in tabs: SidebarTab {
+                                title: tab.title;
+                                active: tab.active;
+                                activated => {
+                                    root.select-tab(tab.id);
+                                    if (!root.sidebar-locked) { root.sidebar-open = false; }
+                                }
+                                closed => { root.close-tab(tab.id); }
+                            }
+                            if (root.tabs.length == 0): Text {
+                                text: "Aucun onglet ouvert";
+                                color: #8e93a9;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: #343544;
+                    }
+                    Rectangle {
+                        height: 62px;
+                        VerticalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 4px;
+                            Text {
+                                text: "Dossiers et espaces enregistrés";
+                                color: #b7aacd;
+                                font-size: 12px;
+                            }
+                            Text {
+                                text: "Disponible dans la prochaine étape";
+                                color: #787f94;
+                                font-size: 11px;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 20px;
+                        Text {
+                            text: "Alt+E : afficher / verrouiller";
+                            color: #727a92;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
                     }
                 }
             }
